@@ -100,7 +100,40 @@ def init_db():
             detail     TEXT DEFAULT '',
             timestamp  TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS announcements (
+            id         TEXT PRIMARY KEY,
+            title      TEXT NOT NULL,
+            body       TEXT NOT NULL,
+            author_id  TEXT NOT NULL,
+            author     TEXT NOT NULL,
+            pinned     INTEGER DEFAULT 0,
+            active     INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS blackout_dates (
+            id     TEXT PRIMARY KEY,
+            date   TEXT NOT NULL UNIQUE,
+            reason TEXT DEFAULT ''
+        );
+
+        -- new columns added via ALTER (safe — ignored if already exist)
         """)
+        # ALTER TABLE additions — each wrapped so failures are silent
+        _alters = [
+            "ALTER TABLE users ADD COLUMN active INTEGER DEFAULT 1",
+            "ALTER TABLE users ADD COLUMN failed_attempts INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN locked_until TEXT DEFAULT NULL",
+            "ALTER TABLE attendance ADD COLUMN late INTEGER DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN cancelled INTEGER DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN cancel_reason TEXT DEFAULT ''",
+        ]
+        for sql in _alters:
+            try:
+                conn.execute(sql)
+            except Exception:
+                pass
 
 # ── Seeds ─────────────────────────────────────────────────────────────────────
 def hash_pw(pw: str) -> str:
@@ -139,7 +172,7 @@ def get_user(user_id: str):
 def get_user_by_id_pw(user_id: str, pw_hash: str):
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM users WHERE id=? AND password=?", (user_id, pw_hash)
+            "SELECT * FROM users WHERE id=? AND password=? AND active=1", (user_id, pw_hash)
         ).fetchone()
         return dict(row) if row else None
 
@@ -395,6 +428,159 @@ def add_audit(actor, action, detail=""):
             "INSERT INTO audit_log(id,actor,action,detail) VALUES(?,?,?,?)",
             (f"A{uuid4().hex[:8]}", actor, action, detail)
         )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# USER — ACCOUNT STATUS / LOGIN SECURITY
+# ══════════════════════════════════════════════════════════════════════════════
+def get_active_user_by_id_pw(user_id: str, pw_hash: str):
+    """Return user only if active and not locked."""
+    from datetime import datetime as dt
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE id=? AND password=? AND active=1", (user_id, pw_hash)
+        ).fetchone()
+        if not row:
+            return None
+        u = dict(row)
+        if u.get("locked_until"):
+            try:
+                if dt.now() < dt.fromisoformat(u["locked_until"]):
+                    return "locked"
+            except Exception:
+                pass
+        return u
+
+def record_failed_login(uid):
+    """Increment failed attempts; lock for 15 min after 5 failures."""
+    from datetime import datetime as dt, timedelta
+    with get_conn() as conn:
+        row = conn.execute("SELECT failed_attempts FROM users WHERE id=?", (uid,)).fetchone()
+        if not row:
+            return
+        attempts = (row[0] or 0) + 1
+        locked_until = None
+        if attempts >= 5:
+            locked_until = str(dt.now() + timedelta(minutes=15))
+            attempts = 0
+        conn.execute(
+            "UPDATE users SET failed_attempts=?, locked_until=? WHERE id=?",
+            (attempts, locked_until, uid)
+        )
+
+def reset_failed_login(uid):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET failed_attempts=0, locked_until=NULL WHERE id=?", (uid,))
+
+def set_user_active(uid, active: bool):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET active=? WHERE id=?", (1 if active else 0, uid))
+
+def delete_user(uid):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM users WHERE id=?", (uid,))
+
+def get_session_by_id(sid):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+        return dict(row) if row else None
+
+def update_session(sid, course, lecturer, date_str, start_time, end_time, max_students, notes):
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE sessions SET course=?,lecturer=?,date=?,start_time=?,
+               end_time=?,max_students=?,notes=? WHERE id=?""",
+            (course, lecturer, date_str, start_time, end_time, max_students, notes, sid)
+        )
+
+def cancel_session(sid, reason):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE sessions SET cancelled=1, cancel_reason=? WHERE id=?", (reason, sid)
+        )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ATTENDANCE — LATE FLAG + LATE-CHECK HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+def create_attendance_v2(aid, student_id, student_name, atype, reference_id,
+                          workstation, date_str, time_str, late=False):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO attendance(id,student_id,student_name,type,reference_id,
+               workstation,date,time,status,checked_out,late)
+               VALUES(?,?,?,?,?,?,?,?,'present',0,?)""",
+            (aid, student_id, student_name, atype, reference_id,
+             workstation, date_str, time_str, 1 if late else 0)
+        )
+
+def is_late_for_session(session_id, checkin_time_str):
+    """Return True if checkin_time_str is more than 10 min after session start."""
+    from datetime import datetime as dt
+    s = get_session_by_id(session_id)
+    if not s:
+        return False
+    try:
+        start = dt.strptime(s["start_time"], "%H:%M")
+        checkin = dt.strptime(checkin_time_str, "%H:%M")
+        return (checkin - start).total_seconds() > 600
+    except Exception:
+        return False
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BLACKOUT DATES
+# ══════════════════════════════════════════════════════════════════════════════
+def get_blackout_dates():
+    with get_conn() as conn:
+        return [dict(r) for r in
+                conn.execute("SELECT * FROM blackout_dates ORDER BY date").fetchall()]
+
+def add_blackout_date(date_str, reason):
+    from uuid import uuid4
+    with get_conn() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO blackout_dates(id,date,reason) VALUES(?,?,?)",
+                (f"BD{uuid4().hex[:6]}", date_str, reason)
+            )
+            return True
+        except Exception:
+            return False
+
+def remove_blackout_date(date_str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM blackout_dates WHERE date=?", (date_str,))
+
+def is_blackout(date_str):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM blackout_dates WHERE date=?", (date_str,)
+        ).fetchone() is not None
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ANNOUNCEMENTS
+# ══════════════════════════════════════════════════════════════════════════════
+def get_announcements(active_only=True):
+    with get_conn() as conn:
+        sql = "SELECT * FROM announcements"
+        if active_only:
+            sql += " WHERE active=1"
+        sql += " ORDER BY pinned DESC, created_at DESC"
+        return [dict(r) for r in conn.execute(sql).fetchall()]
+
+def create_announcement(title, body, author_id, author, pinned=False):
+    from uuid import uuid4
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO announcements(id,title,body,author_id,author,pinned) VALUES(?,?,?,?,?,?)",
+            (f"ANN{uuid4().hex[:6]}", title, body, author_id, author, 1 if pinned else 0)
+        )
+
+def deactivate_announcement(ann_id):
+    with get_conn() as conn:
+        conn.execute("UPDATE announcements SET active=0 WHERE id=?", (ann_id,))
+
+def toggle_pin(ann_id, pinned):
+    with get_conn() as conn:
+        conn.execute("UPDATE announcements SET pinned=? WHERE id=?", (1 if pinned else 0, ann_id))
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 init_db()
