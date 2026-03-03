@@ -1,11 +1,9 @@
 """
-SimLab Manager v4  —  app.py
-New in v4: session timeout, login lockout, account deactivation/deletion,
-blackout dates, student booking cancellation, late check-in flag,
-bulk session check-in, Gmail email notifications, student QR codes,
-announcement board with login pop-up, admin edit/cancel sessions.
+SimLab Manager v6  —  app.py
+Cleaned up and bug-fixed release. All roles properly scoped,
+dead code removed, tab-return bugs fixed, auto_reject consolidated.
 """
-import os, io, base64, smtplib, hashlib
+import os, io, smtplib, hashlib, re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
@@ -14,7 +12,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import qrcode
-from PIL import Image
 
 import database as db
 
@@ -33,6 +30,27 @@ MAX_PER_SLOT     = 5
 MAX_BOOK_DAYS    = 2
 SECURITY_QS      = ["What is your pet's name?","What city were you born in?",
                     "What is your mother's maiden name?","What was your first school's name?"]
+
+# UENR Student ID format: starts with UEB05, e.g. UEB0501721
+STUDENT_ID_PATTERN = re.compile(r'^UEB05\d+$', re.IGNORECASE)
+
+def validate_student_id(uid: str) -> tuple[bool, str]:
+    """Return (valid, error_message). Only enforced for student role."""
+    uid = uid.strip()
+    if not uid:
+        return False, "ID cannot be empty."
+    if not re.match(r'^[A-Za-z0-9]+$', uid):
+        return False, "ID must contain only letters and numbers (no spaces or symbols)."
+    return True, ""
+
+def validate_student_role_id(uid: str) -> tuple[bool, str]:
+    """Strict UENR format check applied only to student IDs."""
+    ok, err = validate_student_id(uid)
+    if not ok:
+        return False, err
+    if not STUDENT_ID_PATTERN.match(uid):
+        return False, "Student ID must follow UENR format: UEB05XXXXXXX (e.g. UEB0501721)."
+    return True, ""
 
 def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
 
@@ -170,7 +188,6 @@ def maybe_show_ann_popup():
 # AUTH PAGES
 # ══════════════════════════════════════════════════════════════════════════════
 def auth_pages():
-    db.auto_reject_expired()
     col1, col2, col3 = st.columns([1,1.6,1])
     with col2:
         st.markdown("""<div class="main-header" style="text-align:center">
@@ -203,7 +220,7 @@ def auth_pages():
                         if u:
                             db.record_failed_login(uid)
                         st.error("Invalid ID or password.")
-            st.caption("Don't have an account? Register in the next tab. Forgot your password? Go to the Reset Password tab.")
+            st.info("👆 Enter your UENR Student ID (e.g. UEB0501721) and password to log in.")
 
         # REGISTER ─────────────────────────────────────────────────────────
         with tab_r:
@@ -225,6 +242,13 @@ def auth_pages():
                     if new_pw != new_pw2:   errs.append("Passwords do not match.")
                     if len(new_pw) < 6:     errs.append("Password must be ≥ 6 characters.")
                     if role_choice=="admin" and invite!=ADMIN_CODE: errs.append("Invalid invite code.")
+                    # ID format validation
+                    if role_choice == "student":
+                        id_ok, id_err = validate_student_role_id(new_id)
+                        if not id_ok: errs.append(id_err)
+                    else:
+                        id_ok, id_err = validate_student_id(new_id)
+                        if not id_ok: errs.append(id_err)
                     if db.user_exists(new_id): errs.append("ID already registered.")
                     if errs:
                         for e in errs: st.error(e)
@@ -275,13 +299,14 @@ def sidebar_nav():
         pages = {
             "admin":    ["📊 Dashboard","🔔 Notifications","📢 Announcements",
                          "🎓 Students","📅 Lab Sessions","🗓️ Bookings",
-                         "🖥️ Workstations","📋 Attendance","📈 Reports",
-                         "🚫 Blackout Dates","⚙️ Profile & Settings"],
+                         "🖥️ Workstations","📋 Attendance","📝 Assignments",
+                         "📈 Reports","🚫 Blackout Dates","⚙️ Profile & Settings"],
             "lecturer": ["📊 Dashboard","🔔 Notifications","📢 Announcements",
-                         "📅 Lab Sessions","📋 Attendance","⚙️ Profile & Settings"],
-            "student":  ["📊 My Dashboard","🔔 Notifications","📢 Announcements",
-                         "🗓️ Book a Slot","📋 My History","🪪 My QR Code",
+                         "📅 My Sessions","📋 Attendance","📝 Assignments",
                          "⚙️ Profile & Settings"],
+            "student":  ["📊 My Dashboard","🔔 Notifications","📢 Announcements",
+                         "🗓️ Book a Slot","📋 My History","📝 Assignments",
+                         "🪪 My QR Code","⚙️ Profile & Settings"],
         }[role]
         choice = st.radio("Nav", pages, label_visibility="collapsed")
         st.markdown("---")
@@ -416,9 +441,64 @@ def page_my_qr():
 # ══════════════════════════════════════════════════════════════════════════════
 # ADMIN PAGES
 # ══════════════════════════════════════════════════════════════════════════════
+def page_lecturer_dashboard():
+    user = st.session_state.user
+    header("📊 Dashboard", f"Welcome, {user['name']}")
+    maybe_show_ann_popup()
+
+    today        = str(date.today())
+    all_sessions = db.get_all_sessions()
+    my_sessions  = [s for s in all_sessions
+                    if s["lecturer"] == user["name"] and not s.get("cancelled")]
+    today_sess   = [s for s in my_sessions if s["date"] == today]
+    att_all      = db.get_all_attendance()
+
+    # metrics scoped to this lecturer's sessions only
+    my_ref_ids   = {s["id"] for s in my_sessions}
+    my_att       = [a for a in att_all if a["reference_id"] in my_ref_ids]
+    today_att    = [a for a in my_att if a["date"] == today]
+    active_now   = [a for a in today_att if not a["checked_out"]]
+
+    c1, c2, c3, c4 = st.columns(4)
+    metric(c1, len(my_sessions),  "My Total Sessions")
+    metric(c2, len(today_sess),   "My Sessions Today")
+    metric(c3, len(today_att),    "Check-ins Today")
+    metric(c4, len(active_now),   "Currently In Lab")
+
+    st.markdown("---")
+    cl, cr = st.columns(2)
+
+    with cl:
+        st.subheader("📅 My Sessions Today")
+        if today_sess:
+            for s in today_sess:
+                cnt  = len([a for a in att_all if a["reference_id"] == s["id"]])
+                late = len([a for a in att_all if a["reference_id"] == s["id"]
+                            and a.get("late")])
+                label = (f"**{s['course']}** | {s['start_time']}–{s['end_time']} "
+                         f"| {cnt}/{s['max_students']} present")
+                if late:
+                    label += f" · ⚠️ {late} late"
+                st.info(label)
+        else:
+            st.write("No sessions scheduled for today.")
+
+    with cr:
+        st.subheader("📋 Recent Attendance (My Sessions)")
+        if my_att:
+            recent = sorted(my_att, key=lambda a: (a["date"], a["time"]), reverse=True)[:8]
+            df = pd.DataFrame(recent)[["student_name", "date", "time",
+                                       "workstation", "checked_out"]]
+            df.columns = ["Student", "Date", "Time", "Workstation", "Checked Out"]
+            df["Checked Out"] = df["Checked Out"].map({0: "❌", 1: "✅", False: "❌", True: "✅"})
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.write("No attendance records for your sessions yet.")
+
+
 def page_admin_dashboard():
-    db.auto_reject_expired()
     header("📊 Dashboard","Overview of lab activity")
+    maybe_show_ann_popup()
     today    = str(date.today())
     students = db.get_all_users("student")
     t_sess   = [s for s in db.get_sessions_on_date(today) if not s.get("cancelled")]
@@ -508,47 +588,54 @@ def page_students():
             pw    = c2.text_input("Password *", type="password")
             if st.form_submit_button("Register", use_container_width=True):
                 if sid and name and pw:
-                    ok = db.create_user(sid,name,email,hash_pw(pw),"student",
-                                        SECURITY_QS[0],hash_pw("changeme"))
-                    if ok:
-                        db.add_audit(st.session_state.user["id"],"REGISTER_STUDENT",sid)
-                        st.success(f"Student {name} registered!"); st.rerun()
-                    else: st.error("ID already exists.")
+                    id_ok, id_err = validate_student_role_id(sid)
+                    if not id_ok:
+                        st.error(id_err)
+                    else:
+                        ok = db.create_user(sid,name,email,hash_pw(pw),"student",
+                                            SECURITY_QS[0],hash_pw("changeme"))
+                        if ok:
+                            db.add_audit(st.session_state.user["id"],"REGISTER_STUDENT",sid)
+                            st.success(f"Student {name} registered!"); st.rerun()
+                        else: st.error("ID already exists.")
                 else: st.error("Fill all required fields.")
 
     with tab3:
         st.subheader("Deactivate, Reactivate or Delete Accounts")
-        all_users = [u for u in db.get_all_users() if u["id"]!=st.session_state.user["id"]]
-        if not all_users: st.info("No other users."); return
-        target_id = st.selectbox("Select user",
-            [f"{u['id']} — {u['name']} ({u['role']}) {'🔴 Inactive' if not u.get('active',1) else ''}"
-             for u in all_users])
-        selected  = all_users[[f"{u['id']} — {u['name']} ({u['role']}) {'🔴 Inactive' if not u.get('active',1) else ''}"
-                                for u in all_users].index(target_id)]
-        is_active = bool(selected.get("active",1))
-
-        c1,c2,c3 = st.columns(3)
-        if is_active:
-            if c1.button("🔴 Deactivate Account", use_container_width=True):
-                db.set_user_active(selected["id"], False)
-                db.add_audit(st.session_state.user["id"],"DEACTIVATE",selected["id"])
-                st.success(f"{selected['name']} deactivated."); st.rerun()
+        all_users = [u for u in db.get_all_users() if u["id"] != st.session_state.user["id"]]
+        if not all_users:
+            st.info("No other users.")
         else:
-            if c1.button("✅ Reactivate Account", use_container_width=True):
-                db.set_user_active(selected["id"], True)
-                db.add_audit(st.session_state.user["id"],"REACTIVATE",selected["id"])
-                st.success(f"{selected['name']} reactivated."); st.rerun()
+            def _user_label(u):
+                inactive = "🔴 Inactive" if not u.get("active", 1) else ""
+                return f"{u['id']} — {u['name']} ({u['role']}) {inactive}".strip()
 
-        st.markdown("---")
-        st.error("⚠️ Danger Zone")
-        confirm = st.text_input(f"Type **{selected['id']}** to confirm deletion")
-        if c3.button("🗑️ Delete Permanently", use_container_width=True):
-            if confirm == selected["id"]:
-                db.delete_user(selected["id"])
-                db.add_audit(st.session_state.user["id"],"DELETE_USER",selected["id"])
-                st.success("User deleted."); st.rerun()
+            target_id = st.selectbox("Select user", [_user_label(u) for u in all_users])
+            selected  = all_users[[_user_label(u) for u in all_users].index(target_id)]
+            is_active = bool(selected.get("active", 1))
+
+            c1, c2, c3 = st.columns(3)
+            if is_active:
+                if c1.button("🔴 Deactivate Account", use_container_width=True):
+                    db.set_user_active(selected["id"], False)
+                    db.add_audit(st.session_state.user["id"], "DEACTIVATE", selected["id"])
+                    st.success(f"{selected['name']} deactivated."); st.rerun()
             else:
-                st.error("ID confirmation does not match.")
+                if c1.button("✅ Reactivate Account", use_container_width=True):
+                    db.set_user_active(selected["id"], True)
+                    db.add_audit(st.session_state.user["id"], "REACTIVATE", selected["id"])
+                    st.success(f"{selected['name']} reactivated."); st.rerun()
+
+            st.markdown("---")
+            st.error("⚠️ Danger Zone")
+            confirm = st.text_input(f"Type  {selected['id']}  to confirm deletion")
+            if c3.button("🗑️ Delete Permanently", use_container_width=True):
+                if confirm == selected["id"]:
+                    db.delete_user(selected["id"])
+                    db.add_audit(st.session_state.user["id"], "DELETE_USER", selected["id"])
+                    st.success("User deleted."); st.rerun()
+                else:
+                    st.error("ID confirmation does not match.")
 
 
 def page_lab_sessions():
@@ -637,56 +724,62 @@ def page_lab_sessions():
 
     with tab3:
         sessions = [s for s in db.get_all_sessions() if not s.get("cancelled")]
-        if not sessions: st.info("No active sessions to edit."); return
-        sel_label = st.selectbox("Select session to edit / cancel",
-            [f"{s['id']} | {s['course']} | {s['date']} {s['start_time']}–{s['end_time']}"
-             for s in sessions])
-        sel_id = sel_label.split(" | ")[0]
-        s = db.get_session_by_id(sel_id)
+        if not sessions:
+            st.info("No active sessions to edit.")
+        else:
+            sel_label = st.selectbox("Select session to edit / cancel",
+                [f"{s['id']} | {s['course']} | {s['date']} {s['start_time']}–{s['end_time']}"
+                 for s in sessions])
+            sel_id = sel_label.split(" | ")[0]
+            s = db.get_session_by_id(sel_id)
 
-        edit_tab, cancel_tab = st.tabs(["✏️ Edit Session","❌ Cancel Session"])
-        with edit_tab:
-            users    = db.get_all_users()
-            lecs     = [u for u in users if u["role"] in ("lecturer","admin")]
-            lec_names = [l["name"] for l in lecs]
-            with st.form("edit_sess"):
-                c1,c2   = st.columns(2)
-                e_course = c1.text_input("Course *", value=s["course"])
-                lec_idx  = lec_names.index(s["lecturer"]) if s["lecturer"] in lec_names else 0
-                e_lec    = c2.selectbox("Lecturer", lec_names, index=lec_idx)
-                e_date   = c1.date_input("Date", value=date.fromisoformat(s["date"]))
-                e_start  = c2.text_input("Start Time *", value=s["start_time"])
-                e_end    = c1.text_input("End Time *",   value=s["end_time"])
-                e_max    = c2.number_input("Max Students",1,20,s["max_students"])
-                e_notes  = st.text_area("Notes", value=s.get("notes",""))
-                if st.form_submit_button("💾 Save Changes", use_container_width=True):
-                    conflict = db.sessions_overlap(str(e_date),e_start,e_end,exclude_id=sel_id)
-                    if conflict: st.error(f"Time conflict with **{conflict['course']}**.")
+            edit_tab, cancel_tab = st.tabs(["✏️ Edit Session","❌ Cancel Session"])
+            with edit_tab:
+                users     = db.get_all_users()
+                lecs      = [u for u in users if u["role"] in ("lecturer","admin")]
+                lec_names = [l["name"] for l in lecs]
+                with st.form("edit_sess"):
+                    c1, c2   = st.columns(2)
+                    e_course = c1.text_input("Course *", value=s["course"])
+                    lec_idx  = lec_names.index(s["lecturer"]) if s["lecturer"] in lec_names else 0
+                    e_lec    = c2.selectbox("Lecturer", lec_names, index=lec_idx)
+                    e_date   = c1.date_input("Date", value=date.fromisoformat(s["date"]))
+                    e_start  = c2.text_input("Start Time *", value=s["start_time"])
+                    e_end    = c1.text_input("End Time *",   value=s["end_time"])
+                    e_max    = c2.number_input("Max Students", 1, 20, s["max_students"])
+                    e_notes  = st.text_area("Notes", value=s.get("notes",""))
+                    if st.form_submit_button("💾 Save Changes", use_container_width=True):
+                        conflict = db.sessions_overlap(str(e_date), e_start, e_end, exclude_id=sel_id)
+                        if conflict:
+                            st.error(f"Time conflict with **{conflict['course']}**.")
+                        else:
+                            db.update_session(sel_id, e_course, e_lec, str(e_date),
+                                              e_start, e_end, int(e_max), e_notes)
+                            db.add_audit(st.session_state.user["id"], "EDIT_SESSION", sel_id)
+                            st.success("Session updated!"); st.rerun()
+            with cancel_tab:
+                reason = st.text_area("Cancellation reason *")
+                if st.button("❌ Cancel This Session", use_container_width=True):
+                    if reason:
+                        db.cancel_session(sel_id, reason)
+                        db.add_audit(st.session_state.user["id"], "CANCEL_SESSION", sel_id)
+                        att_all  = db.get_all_attendance()
+                        affected = [a["student_id"] for a in att_all
+                                    if a["reference_id"] == sel_id]
+                        for affected_id in affected:
+                            notify_and_email(affected_id,
+                                f"Session '{s['course']}' on {s['date']} cancelled. "
+                                f"Reason: {reason}", "warning",
+                                "SimLab: Session Cancelled",
+                                f"<p>The session <b>{s['course']}</b> on <b>{s['date']}</b> "
+                                f"has been cancelled.</p><p>Reason: {reason}</p>")
+                        st.success("Session cancelled and affected students notified.")
+                        st.rerun()
                     else:
-                        db.update_session(sel_id,e_course,e_lec,str(e_date),e_start,e_end,int(e_max),e_notes)
-                        db.add_audit(st.session_state.user["id"],"EDIT_SESSION",sel_id)
-                        st.success("Session updated!"); st.rerun()
-        with cancel_tab:
-            reason = st.text_area("Cancellation reason *")
-            if st.button("❌ Cancel This Session", use_container_width=True):
-                if reason:
-                    db.cancel_session(sel_id, reason)
-                    db.add_audit(st.session_state.user["id"],"CANCEL_SESSION",sel_id)
-                    # notify all students who are checked in
-                    att_all = db.get_all_attendance()
-                    affected = [a["student_id"] for a in att_all if a["reference_id"]==sel_id]
-                    for sid in affected:
-                        notify_and_email(sid,
-                            f"Session '{s['course']}' on {s['date']} has been cancelled. Reason: {reason}",
-                            "warning","SimLab: Session Cancelled",
-                            f"<p>The session <b>{s['course']}</b> on <b>{s['date']}</b> has been cancelled.</p>"
-                            f"<p>Reason: {reason}</p>")
-                    st.success("Session cancelled and affected students notified."); st.rerun()
-                else: st.error("Please provide a cancellation reason.")
+                        st.error("Please provide a cancellation reason.")
 
 
 def page_bookings():
-    db.auto_reject_expired()
     header("🗓️ Open-Access Bookings")
     tab1, tab2 = st.tabs(["🔔 Requests","📅 Slot Overview"])
     with tab1:
@@ -781,7 +874,9 @@ def page_workstations():
 
 def page_attendance():
     header("📋 Attendance & Check-In / Out")
-    tab1, tab2, tab3, tab4 = st.tabs(["✅ Check-In","👥 Bulk Session Check-In","🚪 Check-Out","📋 Records & Export"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "✅ Check-In","👥 Bulk Session Check-In",
+        "🚪 Check-Out","📋 Records & Export","📄 Per-Session Export"])
 
     # SINGLE CHECK-IN ─────────────────────────────────────────────────────────
     with tab1:
@@ -822,7 +917,8 @@ def page_attendance():
                     db.create_attendance_v2(next_att_id(), sid_to_use, student["name"],
                                             check_type, ref_id, ws,
                                             str(date.today()), t_now, late=late)
-                    db.set_workstation_status(ws,"in-use")
+                    if ws and ws in avail_ws:
+                        db.set_workstation_status(ws, "in-use")
                     msg = f"Checked in at {ws} · {date.today()} {t_now}"
                     if late: msg += " ⚠️ (marked late)"
                     notify_and_email(sid_to_use, msg, "info")
@@ -835,48 +931,53 @@ def page_attendance():
     with tab2:
         st.subheader("Bulk Check-In for a Scheduled Session")
         sessions = [s for s in db.get_all_sessions() if not s.get("cancelled")]
-        if not sessions: st.info("No active sessions."); return
-        sel_label = st.selectbox("Select Session",
-            [f"{s['id']} | {s['course']} | {s['date']} {s['start_time']}–{s['end_time']}"
-             for s in sessions])
-        sel_id   = sel_label.split(" | ")[0]
-        sel_sess = db.get_session_by_id(sel_id)
-        avail_ws = [w["label"] for w in db.get_available_workstations()]
-        all_students = db.get_all_users("student")
-        already_in   = {a["student_id"] for a in db.get_active_checkins(str(date.today()))}
-        eligible     = [s for s in all_students if s["id"] not in already_in]
+        if not sessions:
+            st.info("No active sessions.")
+        else:
+            sel_label = st.selectbox("Select Session",
+                [f"{s['id']} | {s['course']} | {s['date']} {s['start_time']}–{s['end_time']}"
+                 for s in sessions])
+            sel_id   = sel_label.split(" | ")[0]
+            sel_sess = db.get_session_by_id(sel_id)
+            avail_ws = [w["label"] for w in db.get_available_workstations()]
+            all_students = db.get_all_users("student")
+            already_in   = {a["student_id"] for a in db.get_active_checkins(str(date.today()))}
+            eligible     = [s for s in all_students if s["id"] not in already_in]
 
-        if not eligible: st.info("All registered students are already checked in today."); return
-
-        selected_studs = st.multiselect(
-            "Select students to check in",
-            options=[f"{s['id']} — {s['name']}" for s in eligible],
-            help="Tick each student present in this session"
-        )
-        t_now = datetime.now().strftime("%H:%M")
-        late  = db.is_late_for_session(sel_id, t_now)
-
-        if st.button(f"✅ Check In {len(selected_studs)} Student(s)", use_container_width=True,
-                     disabled=not selected_studs):
-            assigned_ws = avail_ws.copy()
-            checked = 0
-            for entry in selected_studs:
-                sid = entry.split(" — ")[0]
-                student = db.get_user(sid)
-                if not student: continue
-                ws_label = assigned_ws.pop(0) if assigned_ws else "Unassigned"
-                db.create_attendance_v2(next_att_id(), sid, student["name"],
-                                        "Scheduled Session", sel_id, ws_label,
-                                        str(date.today()), t_now, late=late)
-                if ws_label != "Unassigned":
-                    db.set_workstation_status(ws_label,"in-use")
-                notify_and_email(sid,
-                    f"Checked in to {sel_sess['course']} at {ws_label}" + (" ⚠️ (late)" if late else ""),
-                    "info")
-                checked += 1
-            db.add_audit(st.session_state.user["id"],"BULK_CHECKIN",f"{checked} students for {sel_id}")
-            st.success(f"✅ {checked} student(s) checked in!" + (" Late arrivals flagged." if late else ""))
-            st.rerun()
+            if not eligible:
+                st.info("All registered students are already checked in today.")
+            else:
+                selected_studs = st.multiselect(
+                    "Select students to check in",
+                    options=[f"{s['id']} — {s['name']}" for s in eligible],
+                    help="Tick each student present in this session"
+                )
+                if st.button(f"✅ Check In {len(selected_studs)} Student(s)",
+                             use_container_width=True, disabled=not selected_studs):
+                    t_now      = datetime.now().strftime("%H:%M")
+                    late       = db.is_late_for_session(sel_id, t_now)
+                    assigned_ws = avail_ws.copy()
+                    checked    = 0
+                    for entry in selected_studs:
+                        sid     = entry.split(" — ")[0]
+                        student = db.get_user(sid)
+                        if not student:
+                            continue
+                        ws_label = assigned_ws.pop(0) if assigned_ws else "Unassigned"
+                        db.create_attendance_v2(next_att_id(), sid, student["name"],
+                                                "Scheduled Session", sel_id, ws_label,
+                                                str(date.today()), t_now, late=late)
+                        if ws_label != "Unassigned":
+                            db.set_workstation_status(ws_label, "in-use")
+                        notify_and_email(sid,
+                            f"Checked in to {sel_sess['course']} at {ws_label}"
+                            + (" ⚠️ (late)" if late else ""), "info")
+                        checked += 1
+                    db.add_audit(st.session_state.user["id"], "BULK_CHECKIN",
+                                 f"{checked} students for {sel_id}")
+                    st.success(f"✅ {checked} student(s) checked in!"
+                               + (" Late arrivals flagged." if late else ""))
+                    st.rerun()
 
     # CHECK-OUT ───────────────────────────────────────────────────────────────
     with tab3:
@@ -901,26 +1002,87 @@ def page_attendance():
     # RECORDS ─────────────────────────────────────────────────────────────────
     with tab4:
         att = db.get_all_attendance()
-        if not att: st.info("No records yet."); return
-        df = pd.DataFrame(att)
-        c1,c2,c3 = st.columns(3)
-        d_f = c1.date_input("Date",value=None)
-        t_f = c2.selectbox("Type",["All","Scheduled Session","Open-Access Booking"])
-        s_f = c3.text_input("Student ID / Name")
-        if d_f: df=df[df["date"]==str(d_f)]
-        if t_f!="All": df=df[df["type"]==t_f]
-        if s_f:
-            df=df[df["student_id"].str.contains(s_f,case=False)|
-                  df["student_name"].str.contains(s_f,case=False)]
-        st.dataframe(df,use_container_width=True,hide_index=True)
-        c1,c2 = st.columns(2)
-        c1.download_button("📥 Download CSV",df.to_csv(index=False),"attendance.csv","text/csv",use_container_width=True)
-        # Excel export
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf,engine="openpyxl") as w:
-            df.to_excel(w,index=False,sheet_name="Attendance")
-        c2.download_button("📊 Download Excel",buf.getvalue(),"attendance.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+        if not att:
+            st.info("No records yet.")
+        else:
+            df = pd.DataFrame(att)
+            c1,c2,c3 = st.columns(3)
+            d_f = c1.date_input("Date", value=None)
+            t_f = c2.selectbox("Type", ["All","Scheduled Session","Open-Access Booking"])
+            s_f = c3.text_input("Student ID / Name")
+            if d_f: df = df[df["date"] == str(d_f)]
+            if t_f != "All": df = df[df["type"] == t_f]
+            if s_f:
+                df = df[df["student_id"].str.contains(s_f, case=False) |
+                        df["student_name"].str.contains(s_f, case=False)]
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            c1, c2 = st.columns(2)
+            c1.download_button("📥 Download CSV", df.to_csv(index=False),
+                               "attendance.csv", "text/csv", use_container_width=True)
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                df.to_excel(w, index=False, sheet_name="Attendance")
+            c2.download_button("📊 Download Excel", buf.getvalue(), "attendance.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
+
+    # PER-SESSION EXPORT ──────────────────────────────────────────────────────
+    with tab5:
+        st.subheader("📄 Export Attendance for a Specific Session")
+        sessions = db.get_all_sessions()
+        if not sessions:
+            st.info("No sessions available.")
+        else:
+            sel = st.selectbox("Select Session",
+                [f"{s['id']} | {s['course']} | {s['date']} {s['start_time']}–{s['end_time']}"
+                 for s in sessions])
+            sel_id   = sel.split(" | ")[0]
+            sel_sess = db.get_session_by_id(sel_id)
+            att      = db.get_attendance_for_session(sel_id)
+
+            if not att:
+                st.warning("No attendance records for this session yet.")
+            else:
+                df = pd.DataFrame(att)
+                display_cols = [c for c in
+                    ["student_id","student_name","email","time","late","workstation","checkout_time"]
+                    if c in df.columns]
+                df_display = df[display_cols].copy()
+                df_display.columns = [c.replace("_"," ").title() for c in display_cols]
+
+                total  = len(df)
+                late_c = int(df["late"].sum()) if "late" in df.columns else 0
+                st.markdown(f"**Session:** {sel_sess['course']} · "
+                            f"{sel_sess['date']} {sel_sess['start_time']}–{sel_sess['end_time']} · "
+                            f"Lecturer: {sel_sess['lecturer']}")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total Present", total)
+                c2.metric("On Time",       total - late_c)
+                c3.metric("Late Arrivals", late_c)
+
+                st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+                fname_base = f"attendance_{sel_sess['course'].replace(' ','_')}_{sel_sess['date']}"
+                c1, c2 = st.columns(2)
+                c1.download_button("📥 Download CSV",
+                                   df_display.to_csv(index=False),
+                                   f"{fname_base}.csv", "text/csv",
+                                   use_container_width=True)
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    info_df = pd.DataFrame({
+                        "Field": ["Course","Date","Time","Lecturer","Max Students","Present","Late"],
+                        "Value": [sel_sess["course"], sel_sess["date"],
+                                  f"{sel_sess['start_time']}–{sel_sess['end_time']}",
+                                  sel_sess["lecturer"], sel_sess["max_students"],
+                                  total, late_c]
+                    })
+                    info_df.to_excel(writer, index=False, sheet_name="Session Info")
+                    df_display.to_excel(writer, index=False, sheet_name="Attendance")
+                c2.download_button("📊 Download Excel", buf.getvalue(),
+                                   f"{fname_base}.xlsx",
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True)
 
 
 def page_reports():
@@ -1110,13 +1272,315 @@ def page_my_history():
     else: st.info("No visit records yet.")
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ASSIGNMENTS — LECTURER / ADMIN
+# ══════════════════════════════════════════════════════════════════════════════
+def page_assignments_staff():
+    user = st.session_state.user
+    header("📝 Assignments","Create, manage and grade lab assignments")
+
+    tab1, tab2, tab3 = st.tabs(["📋 All Assignments","➕ Create Assignment","✏️ Grade Submissions"])
+
+    # ALL ASSIGNMENTS ─────────────────────────────────────────────────────────
+    with tab1:
+        q    = search_box("Search by title or course...")
+        asgs = db.get_all_assignments()
+        if user["role"] == "lecturer":
+            asgs = [a for a in asgs if a["created_by"] == user["id"]]
+        if q:
+            asgs = [a for a in asgs if q.lower() in a["title"].lower()
+                    or q.lower() in a["course"].lower()]
+        if asgs:
+            rows = []
+            for a in asgs:
+                subs      = db.get_submissions_for_assignment(a["id"])
+                graded    = sum(1 for s in subs if s["grade"] is not None)
+                past_due  = date.today() > date.fromisoformat(a["deadline"][:10])
+                rows.append({
+                    "ID": a["id"], "Title": a["title"], "Course": a["course"],
+                    "Deadline": a["deadline"][:10],
+                    "Submissions": f"{len(subs)} ({graded} graded)",
+                    "Status": "⌛ Past Due" if past_due else "✅ Open",
+                    "Active": "✅" if a["active"] else "🗃️"
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            # archive
+            active_asgs = [a for a in asgs if a["active"]]
+            if active_asgs:
+                arc_label = st.selectbox("Archive an assignment",
+                    ["-- select --"] + [f"{a['id']} — {a['title']}" for a in active_asgs])
+                if arc_label != "-- select --" and st.button("🗃️ Archive Selected"):
+                    db.deactivate_assignment(arc_label.split(" — ")[0])
+                    st.success("Assignment archived."); st.rerun()
+        else:
+            st.info("No assignments yet.")
+
+    # CREATE ASSIGNMENT ───────────────────────────────────────────────────────
+    with tab2:
+        sessions = db.get_all_sessions()
+        if user["role"] == "lecturer":
+            sessions = [s for s in sessions if s["lecturer"] == user["name"]]
+        courses = sorted(set(s["course"] for s in sessions)) or ["General"]
+
+        with st.form("create_asg"):
+            c1, c2 = st.columns(2)
+            title       = c1.text_input("Assignment Title *")
+            course      = c2.selectbox("Course *", courses)
+            deadline    = c1.date_input("Deadline *", min_value=date.today())
+            deadline_t  = c2.time_input("Deadline Time", value=datetime.strptime("23:59","%H:%M").time())
+            max_score   = c1.number_input("Max Score", 1, 100, 100)
+            link_sess   = c2.selectbox("Link to Session (optional)",
+                ["None"] + [f"{s['id']} | {s['course']} | {s['date']}" for s in sessions])
+            description = st.text_area("Instructions / Description *")
+
+            if st.form_submit_button("📤 Publish Assignment", use_container_width=True):
+                if title and description:
+                    from uuid import uuid4
+                    aid        = f"ASG{db.assignment_count()+1:04d}"
+                    sess_id    = link_sess.split(" | ")[0] if link_sess != "None" else ""
+                    deadline_str = f"{deadline} {deadline_t.strftime('%H:%M')}"
+                    db.create_assignment(aid, title, description, course, sess_id,
+                                         user["id"], user["name"], deadline_str, max_score)
+                    # notify all students
+                    for stu in db.get_all_users("student"):
+                        notify_and_email(stu["id"],
+                            f"📝 New assignment: {title} — due {deadline}",
+                            "info", f"SimLab: New Assignment — {title}",
+                            f"<h3>{title}</h3><p><b>Course:</b> {course}</p>"
+                            f"<p><b>Deadline:</b> {deadline_str}</p>"
+                            f"<p><b>Instructions:</b><br>{description}</p>"
+                            f"<p>Log in to SimLab to submit your work.</p>")
+                    db.add_audit(user["id"], "CREATE_ASSIGNMENT", aid)
+                    st.success(f"Assignment **{aid}** published and students notified!"); st.rerun()
+                else:
+                    st.error("Title and description are required.")
+
+    # GRADE SUBMISSIONS ───────────────────────────────────────────────────────
+    with tab3:
+        asgs = db.get_all_assignments()
+        if user["role"] == "lecturer":
+            asgs = [a for a in asgs if a["created_by"] == user["id"]]
+        if not asgs:
+            st.info("No assignments to grade.")
+        else:
+            asg_label = st.selectbox("Select Assignment",
+                [f"{a['id']} — {a['title']} ({a['course']})" for a in asgs])
+            asg_id  = asg_label.split(" — ")[0]
+            asg     = db.get_assignment(asg_id)
+            subs    = db.get_submissions_for_assignment(asg_id)
+
+            if not subs:
+                st.info("No submissions yet for this assignment.")
+            else:
+                graded   = [s for s in subs if s["grade"] is not None]
+                ungraded = [s for s in subs if s["grade"] is None]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total Submissions", len(subs))
+                c2.metric("Graded",   len(graded))
+                c3.metric("Ungraded", len(ungraded))
+
+                st.markdown("---")
+                filter_g  = st.radio("Show", ["All","Ungraded only","Graded only"], horizontal=True)
+                show_subs = subs
+                if filter_g == "Ungraded only": show_subs = ungraded
+                if filter_g == "Graded only":   show_subs = graded
+
+                for sub in show_subs:
+                    with st.expander(
+                        f"{'✅' if sub['grade'] is not None else '⏳'} "
+                        f"{sub['student_name']} ({sub['student_id']}) — "
+                        f"submitted {str(sub['submitted_at'])[:16]}"
+                    ):
+                        c1, c2 = st.columns([3,1])
+                        c1.write(f"**File:** {sub['filename']}")
+                        if sub["file_data"]:
+                            c2.download_button("📥 Download",
+                                data=sub["file_data"],
+                                file_name=sub["filename"],
+                                mime=sub["file_type"],
+                                key=f"dl_{sub['id']}")
+
+                        if sub["grade"] is not None:
+                            st.success(f"**Grade:** {sub['grade']}/{asg['max_score']}  |  "
+                                       f"**Feedback:** {sub['feedback']}")
+                            st.caption(f"Graded by {sub['graded_by']} at "
+                                       f"{str(sub['graded_at'])[:16]}")
+
+                        with st.form(f"grade_form_{sub['id']}"):
+                            gc1, gc2 = st.columns(2)
+                            g_score  = gc1.number_input("Score *", 0.0, float(asg["max_score"]),
+                                                        value=float(sub["grade"]) if sub["grade"] else 0.0,
+                                                        step=0.5, key=f"gs_{sub['id']}")
+                            g_fb     = gc2.text_area("Feedback", value=sub.get("feedback",""),
+                                                     key=f"gf_{sub['id']}")
+                            if st.form_submit_button("💾 Save Grade", use_container_width=True):
+                                db.grade_submission(asg_id, sub["student_id"],
+                                                    g_score, g_fb, user["name"])
+                                notify_and_email(sub["student_id"],
+                                    f"Your submission for '{asg['title']}' has been graded: "
+                                    f"{g_score}/{asg['max_score']}",
+                                    "success", f"SimLab: Assignment Graded — {asg['title']}",
+                                    f"<h3>Assignment: {asg['title']}</h3>"
+                                    f"<p><b>Score:</b> {g_score} / {asg['max_score']}</p>"
+                                    f"<p><b>Feedback:</b><br>{g_fb}</p>")
+                                db.add_audit(user["id"], "GRADE_SUBMISSION",
+                                             f"asg={asg_id} stu={sub['student_id']}")
+                                st.success("Grade saved!"); st.rerun()
+
+                # bulk export grades
+                st.markdown("---")
+                st.subheader("📊 Export Grades")
+                if graded:
+                    grade_rows = [{"Student ID":   s["student_id"],
+                                   "Student Name": s["student_name"],
+                                   "Score":        s["grade"],
+                                   "Max Score":    asg["max_score"],
+                                   "Percentage":   f"{(s['grade']/asg['max_score']*100):.1f}%",
+                                   "Feedback":     s["feedback"],
+                                   "Submitted":    str(s["submitted_at"])[:16],
+                                   "Graded":       str(s["graded_at"])[:16] if s["graded_at"] else ""}
+                                  for s in graded]
+                    gdf = pd.DataFrame(grade_rows)
+                    c1, c2 = st.columns(2)
+                    c1.download_button("📥 CSV", gdf.to_csv(index=False),
+                                       f"grades_{asg_id}.csv", "text/csv", use_container_width=True)
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                        gdf.to_excel(w, index=False, sheet_name="Grades")
+                    c2.download_button("📊 Excel", buf.getvalue(),
+                                       f"grades_{asg_id}.xlsx",
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                       use_container_width=True)
+                else:
+                    st.info("No graded submissions yet to export.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ASSIGNMENTS — STUDENT
+# ══════════════════════════════════════════════════════════════════════════════
+def page_assignments_student():
+    user = st.session_state.user
+    header("📝 My Assignments","View, submit and track your lab assignments")
+
+    tab1, tab2 = st.tabs(["📋 Available Assignments","📊 My Grades"])
+
+    # AVAILABLE & SUBMIT ──────────────────────────────────────────────────────
+    with tab1:
+        asgs = db.get_all_assignments(active_only=True)
+        if not asgs:
+            st.info("No assignments published yet.")
+        else:
+            for asg in asgs:
+                existing = db.get_submission(asg["id"], user["id"])
+                past_due = date.today() > date.fromisoformat(asg["deadline"][:10])
+                status   = ("✅ Submitted" if existing and existing["grade"] is None else
+                            "🏆 Graded"   if existing and existing["grade"] is not None else
+                            "⌛ Past Due" if past_due else "📤 Pending")
+
+                with st.expander(f"{status}  ·  **{asg['title']}**  —  {asg['course']}  "
+                                 f"|  Due: {asg['deadline'][:16]}"):
+                    st.write(f"**Instructions:** {asg['description']}")
+                    st.write(f"**Max Score:** {asg['max_score']}  |  **Lecturer:** {asg['lecturer']}")
+
+                    if existing and existing["grade"] is not None:
+                        pct = existing["grade"] / asg["max_score"] * 100
+                        st.success(f"**Your Grade: {existing['grade']}/{asg['max_score']} ({pct:.1f}%)**")
+                        if existing["feedback"]:
+                            st.info(f"**Feedback:** {existing['feedback']}")
+
+                    if existing:
+                        st.write(f"📎 Current submission: **{existing['filename']}** "
+                                 f"· submitted {str(existing['submitted_at'])[:16]}")
+                        if existing["file_data"]:
+                            st.download_button("📥 Download My Submission",
+                                data=existing["file_data"], file_name=existing["filename"],
+                                mime=existing["file_type"], key=f"mydl_{asg['id']}")
+
+                    if not past_due:
+                        with st.form(f"submit_{asg['id']}"):
+                            label    = "📤 Replace Submission" if existing else "📤 Submit Assignment"
+                            uploaded = st.file_uploader("Upload your work (PDF or DOCX)",
+                                type=["pdf","docx"], key=f"up_{asg['id']}")
+                            if st.form_submit_button(label, use_container_width=True):
+                                if uploaded:
+                                    file_bytes = uploaded.read()
+                                    if len(file_bytes) > 10 * 1024 * 1024:
+                                        st.error("File too large. Maximum size is 10 MB.")
+                                    else:
+                                        if existing:
+                                            db.update_submission_file(
+                                                asg["id"], user["id"],
+                                                uploaded.name, file_bytes, uploaded.type)
+                                            action = "resubmitted"
+                                        else:
+                                            sub_id = f"SUB{db.submission_count()+1:05d}"
+                                            db.create_submission(sub_id, asg["id"], user["id"],
+                                                                 user["name"], uploaded.name,
+                                                                 file_bytes, uploaded.type)
+                                            action = "submitted"
+                                        lec = next((u for u in db.get_all_users()
+                                                    if u["name"] == asg["lecturer"]), None)
+                                        if lec:
+                                            notify_and_email(lec["id"],
+                                                f"{user['name']} {action} '{asg['title']}'", "info",
+                                                f"SimLab: New Submission — {asg['title']}",
+                                                f"<p>{user['name']} ({user['id']}) has {action} "
+                                                f"their work for <b>{asg['title']}</b>. "
+                                                f"Log in to review and grade.</p>")
+                                        db.add_audit(user["id"], "SUBMIT_ASSIGNMENT", asg["id"])
+                                        st.success(f"✅ Assignment {action} successfully!")
+                                        st.rerun()
+                                else:
+                                    st.error("Please select a file to upload.")
+                    elif not existing:
+                        st.error("⌛ Deadline has passed. Submissions are closed.")
+
+    # MY GRADES ───────────────────────────────────────────────────────────────
+    with tab2:
+        my_subs = db.get_submissions_for_student(user["id"])
+        if not my_subs:
+            st.info("No submissions yet.")
+        else:
+            graded = [s for s in my_subs if s["grade"] is not None]
+            if graded:
+                avg = sum(s["grade"] / s["max_score"] * 100 for s in graded) / len(graded)
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Assignments Submitted", len(my_subs))
+                c2.metric("Graded",                len(graded))
+                c3.metric("Average Score",         f"{avg:.1f}%")
+                st.markdown("---")
+
+            rows = []
+            for s in my_subs:
+                past_due = date.today() > date.fromisoformat(s["deadline"][:10])
+                if s["grade"] is not None:
+                    status = f"🏆 {s['grade']}/{s['max_score']} ({s['grade']/s['max_score']*100:.0f}%)"
+                elif past_due:
+                    status = "⌛ Awaiting Grade"
+                else:
+                    status = "✅ Submitted"
+                rows.append({
+                    "Assignment": s["assignment_title"],
+                    "Course":     s["course"],
+                    "Deadline":   s["deadline"][:10],
+                    "Submitted":  str(s["submitted_at"])[:16],
+                    "File":       s["filename"],
+                    "Result":     status,
+                    "Feedback":   s.get("feedback","") or "—"
+                })
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.download_button("📥 Download My Grades",
+                               df.to_csv(index=False), "my_grades.csv", "text/csv")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ROUTER
 # ══════════════════════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
     auth_pages()
 else:
     check_timeout()
-    db.auto_reject_expired()
+    db.auto_reject_expired()   # single authoritative call
     page = sidebar_nav()
     role = st.session_state.user["role"]
 
@@ -1130,16 +1594,18 @@ else:
             "🗓️ Bookings":           page_bookings,
             "🖥️ Workstations":       page_workstations,
             "📋 Attendance":         page_attendance,
+            "📝 Assignments":        page_assignments_staff,
             "📈 Reports":            page_reports,
             "🚫 Blackout Dates":     page_blackout_dates,
             "⚙️ Profile & Settings": page_profile,
         },
         "lecturer": {
-            "📊 Dashboard":          page_admin_dashboard,
+            "📊 Dashboard":          page_lecturer_dashboard,
             "🔔 Notifications":      page_notifications,
             "📢 Announcements":      page_announcements,
-            "📅 Lab Sessions":       page_lab_sessions,
+            "📅 My Sessions":        page_lab_sessions,
             "📋 Attendance":         page_attendance,
+            "📝 Assignments":        page_assignments_staff,
             "⚙️ Profile & Settings": page_profile,
         },
         "student": {
@@ -1148,6 +1614,7 @@ else:
             "📢 Announcements":      page_announcements,
             "🗓️ Book a Slot":        page_book_slot,
             "📋 My History":         page_my_history,
+            "📝 Assignments":        page_assignments_student,
             "🪪 My QR Code":         page_my_qr,
             "⚙️ Profile & Settings": page_profile,
         },

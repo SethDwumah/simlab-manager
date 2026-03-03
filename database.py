@@ -118,6 +118,37 @@ def init_db():
             reason TEXT DEFAULT ''
         );
 
+        CREATE TABLE IF NOT EXISTS assignments (
+            id           TEXT PRIMARY KEY,
+            title        TEXT NOT NULL,
+            description  TEXT DEFAULT '',
+            course       TEXT NOT NULL,
+            session_id   TEXT DEFAULT '',
+            created_by   TEXT NOT NULL,
+            lecturer     TEXT NOT NULL,
+            deadline     TEXT NOT NULL,
+            max_score    REAL DEFAULT 100,
+            active       INTEGER DEFAULT 1,
+            created_at   TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS submissions (
+            id             TEXT PRIMARY KEY,
+            assignment_id  TEXT NOT NULL,
+            student_id     TEXT NOT NULL,
+            student_name   TEXT NOT NULL,
+            filename       TEXT DEFAULT '',
+            file_data      BLOB,
+            file_type      TEXT DEFAULT '',
+            submitted_at   TEXT DEFAULT (datetime('now')),
+            grade          REAL DEFAULT NULL,
+            feedback       TEXT DEFAULT '',
+            graded_at      TEXT DEFAULT NULL,
+            graded_by      TEXT DEFAULT '',
+            FOREIGN KEY(assignment_id) REFERENCES assignments(id),
+            FOREIGN KEY(student_id)    REFERENCES users(id)
+        );
+
         -- new columns added via ALTER (safe — ignored if already exist)
         """)
         # ALTER TABLE additions — each wrapped so failures are silent
@@ -581,6 +612,113 @@ def deactivate_announcement(ann_id):
 def toggle_pin(ann_id, pinned):
     with get_conn() as conn:
         conn.execute("UPDATE announcements SET pinned=? WHERE id=?", (1 if pinned else 0, ann_id))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ASSIGNMENTS
+# ══════════════════════════════════════════════════════════════════════════════
+def get_all_assignments(active_only=False):
+    with get_conn() as conn:
+        sql = "SELECT * FROM assignments"
+        if active_only:
+            sql += " WHERE active=1"
+        sql += " ORDER BY deadline ASC"
+        return [dict(r) for r in conn.execute(sql).fetchall()]
+
+def get_assignment(aid):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM assignments WHERE id=?", (aid,)).fetchone()
+        return dict(row) if row else None
+
+def create_assignment(aid, title, description, course, session_id,
+                      created_by, lecturer, deadline, max_score):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO assignments(id,title,description,course,session_id,
+               created_by,lecturer,deadline,max_score)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (aid, title, description, course, session_id,
+             created_by, lecturer, deadline, max_score)
+        )
+
+def deactivate_assignment(aid):
+    with get_conn() as conn:
+        conn.execute("UPDATE assignments SET active=0 WHERE id=?", (aid,))
+
+def assignment_count():
+    with get_conn() as conn:
+        return conn.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUBMISSIONS
+# ══════════════════════════════════════════════════════════════════════════════
+def get_submissions_for_assignment(assignment_id):
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM submissions WHERE assignment_id=? ORDER BY submitted_at",
+            (assignment_id,)).fetchall()]
+
+def get_submissions_for_student(student_id):
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT s.*, a.title as assignment_title, a.course, a.deadline, a.max_score
+               FROM submissions s
+               JOIN assignments a ON s.assignment_id = a.id
+               WHERE s.student_id=?
+               ORDER BY s.submitted_at DESC""",
+            (student_id,)).fetchall()]
+
+def get_submission(assignment_id, student_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM submissions WHERE assignment_id=? AND student_id=?",
+            (assignment_id, student_id)
+        ).fetchone()
+        return dict(row) if row else None
+
+def create_submission(sub_id, assignment_id, student_id, student_name,
+                      filename, file_data, file_type):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO submissions(id,assignment_id,student_id,student_name,
+               filename,file_data,file_type)
+               VALUES(?,?,?,?,?,?,?)""",
+            (sub_id, assignment_id, student_id, student_name,
+             filename, file_data, file_type)
+        )
+
+def update_submission_file(assignment_id, student_id, filename, file_data, file_type):
+    """Replace an existing submission's file (resubmission)."""
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE submissions SET filename=?,file_data=?,file_type=?,
+               submitted_at=datetime('now'), grade=NULL, feedback='', graded_at=NULL
+               WHERE assignment_id=? AND student_id=?""",
+            (filename, file_data, file_type, assignment_id, student_id)
+        )
+
+def grade_submission(assignment_id, student_id, grade, feedback, graded_by):
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE submissions SET grade=?,feedback=?,graded_at=datetime('now'),
+               graded_by=? WHERE assignment_id=? AND student_id=?""",
+            (grade, feedback, graded_by, assignment_id, student_id)
+        )
+
+def submission_count():
+    with get_conn() as conn:
+        return conn.execute("SELECT COUNT(*) FROM submissions").fetchone()[0]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PER-SESSION ATTENDANCE EXPORT
+# ══════════════════════════════════════════════════════════════════════════════
+def get_attendance_for_session(session_id):
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT a.*, u.email FROM attendance a
+               LEFT JOIN users u ON a.student_id = u.id
+               WHERE a.reference_id=?
+               ORDER BY a.time""",
+            (session_id,)).fetchall()]
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 init_db()
