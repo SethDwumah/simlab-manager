@@ -203,7 +203,7 @@ def auth_pages():
                         if u:
                             db.record_failed_login(uid)
                         st.error("Invalid ID or password.")
-            st.caption("Demo — Admin: ADMIN001/admin123 · Lecturer: LEC001/lec123 · Student: STU001/stu123")
+            st.caption("Don't have an account? Register in the next tab. Forgot your password? Go to the Reset Password tab.")
 
         # REGISTER ─────────────────────────────────────────────────────────
         with tab_r:
