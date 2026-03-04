@@ -1,9 +1,9 @@
 """
-SimLab Manager v6  —  app.py
-Cleaned up and bug-fixed release. All roles properly scoped,
-dead code removed, tab-return bugs fixed, auto_reject consolidated.
+SimLab Manager v7  —  app.py
+Security hardened: bcrypt passwords, uuid IDs, soft-delete, file storage,
+slot count fix, time_input, security question UX, audit log viewer, reports filter.
 """
-import os, io, smtplib, hashlib, re
+import os, io, smtplib, re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date, timedelta
@@ -21,8 +21,8 @@ st.set_page_config(page_title="SimLab Manager", page_icon="🖥️",
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 ADMIN_CODE       = os.environ.get("SIMLAB_ADMIN_CODE", "SIMLAB2024")
-GMAIL_USER       = os.environ.get("SIMLAB_GMAIL_USER", "dwumahseth444@gmail.com")
-GMAIL_APP_PW     = os.environ.get("SIMLAB_GMAIL_APP_PW", "hxxj zpat seud jukj")
+GMAIL_USER       = os.environ.get("SIMLAB_GMAIL_USER", "")
+GMAIL_APP_PW     = os.environ.get("SIMLAB_GMAIL_APP_PW", "")
 SESSION_TIMEOUT  = 30          # minutes
 TIME_SLOTS       = ["08:00–09:00","09:00–10:00","10:00–11:00","11:00–12:00",
                     "13:00–14:00","14:00–15:00","15:00–16:00","16:00–17:00"]
@@ -52,7 +52,9 @@ def validate_student_role_id(uid: str) -> tuple[bool, str]:
         return False, "Student ID must follow UENR format: UEB05XXXXXXX (e.g. UEB0501721)."
     return True, ""
 
-def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
+# Passwords hashed via bcrypt in database.py
+hash_pw  = db.hash_pw
+check_pw = db.check_pw
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -111,7 +113,7 @@ def check_timeout():
 # EMAIL HELPER
 # ══════════════════════════════════════════════════════════════════════════════
 def send_email(to_addr, subject, body_html):
-    """Send via Gmail SMTP. Silently skips if credentials not configured."""
+    """Send via Gmail SMTP. Logs failures to audit log."""
     if not GMAIL_USER or not GMAIL_APP_PW or not to_addr:
         return False
     try:
@@ -124,7 +126,8 @@ def send_email(to_addr, subject, body_html):
             srv.login(GMAIL_USER, GMAIL_APP_PW)
             srv.sendmail(GMAIL_USER, to_addr, msg.as_string())
         return True
-    except Exception:
+    except Exception as e:
+        db.add_audit("SYSTEM", "EMAIL_FAILED", f"to={to_addr} subj={subject[:40]} err={str(e)[:80]}")
         return False
 
 def notify_and_email(user_id, message, ntype="info", subject=None, email_body=None):
@@ -206,7 +209,7 @@ def auth_pages():
                 uid = st.text_input("Student / Staff ID", placeholder="e.g. STU001")
                 pw  = st.text_input("Password", type="password")
                 if st.form_submit_button("Login", width='stretch'):
-                    result = db.get_active_user_by_id_pw(uid, hash_pw(pw))
+                    result = db.get_active_user_by_id_pw(uid, pw)
                     if result == "locked":
                         st.error("🔒 Account temporarily locked after too many failed attempts. Try again in 15 minutes.")
                     elif result:
@@ -267,22 +270,29 @@ def auth_pages():
 
         # RESET PASSWORD ───────────────────────────────────────────────────
         with tab_rst:
+            # Security question shown OUTSIDE the form so it updates live
+            r_id_live = st.text_input("Your ID", key="rst_id_live",
+                                       placeholder="Enter your ID to see your security question")
+            if r_id_live:
+                u_live = db.get_user(r_id_live.strip())
+                if u_live and u_live.get("active",1):
+                    st.info(f"🔐 Security Question: **{u_live['security_q']}**")
+                else:
+                    st.warning("ID not found or account inactive.")
             with st.form("rsf"):
-                r_id  = st.text_input("Your ID *")
-                u_chk = db.get_user(r_id) if r_id else None
-                if u_chk: st.info(f"Security Question: **{u_chk['security_q']}**")
+                r_id  = st.text_input("Your ID *", placeholder="Same ID as above")
                 r_ans  = st.text_input("Security Answer *")
                 r_pw   = st.text_input("New Password *",      type="password")
                 r_pw2  = st.text_input("Confirm Password *",  type="password")
                 if st.form_submit_button("Reset Password", width='stretch'):
-                    u = db.get_user(r_id)
-                    if not u:                                           st.error("ID not found.")
-                    elif u.get("security_a")!=hash_pw(r_ans.lower().strip()): st.error("Wrong answer.")
+                    u = db.get_user(r_id.strip())
+                    if not u or not u.get("active",1):                 st.error("ID not found.")
+                    elif not check_pw(r_ans.lower().strip(), u.get("security_a","")): st.error("Wrong answer.")
                     elif r_pw!=r_pw2:                                  st.error("Passwords don't match.")
                     elif len(r_pw)<6:                                  st.error("Min 6 characters.")
                     else:
-                        db.update_password(r_id, hash_pw(r_pw))
-                        db.add_audit(r_id,"PASSWORD_RESET")
+                        db.update_password(r_id.strip(), hash_pw(r_pw))
+                        db.add_audit(r_id.strip(),"PASSWORD_RESET")
                         st.success("Password reset! You can now log in.")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -303,7 +313,7 @@ def sidebar_nav():
             "admin":    ["📊 Dashboard","🔔 Notifications","📢 Announcements",
                          "🎓 Students","📅 Lab Sessions","🗓️ Bookings",
                          "🖥️ Workstations","📋 Attendance","📝 Assignments",
-                         "📈 Reports","🚫 Blackout Dates","⚙️ Profile & Settings"],
+                         "📈 Reports","🔍 Audit Log","🚫 Blackout Dates","⚙️ Profile & Settings"],
             "lecturer": ["📊 Dashboard","🔔 Notifications","📢 Announcements",
                          "📅 My Sessions","📋 Attendance","📝 Assignments",
                          "⚙️ Profile & Settings"],
@@ -421,7 +431,7 @@ def page_profile():
             new_pw2 = st.text_input("Confirm Password *",  type="password")
             if st.form_submit_button("Change Password", width='stretch'):
                 u = db.get_user(user["id"])
-                if u["password"]!=hash_pw(old_pw): st.error("Current password incorrect.")
+                if not check_pw(old_pw, u["password"]): st.error("Current password incorrect.")
                 elif new_pw!=new_pw2:              st.error("Passwords don't match.")
                 elif len(new_pw)<6:                st.error("Min 6 characters.")
                 else:
@@ -682,8 +692,10 @@ def page_lab_sessions():
                 course  = c1.text_input("Course Name / Code *")
                 lec     = c2.selectbox("Lecturer", lec_names)
                 s_date  = c1.date_input("Date", min_value=date.today())
-                s_start = c2.text_input("Start Time *", placeholder="08:00")
-                s_end   = c1.text_input("End Time *",   placeholder="10:00")
+                s_start_t = c2.time_input("Start Time *", value=datetime.strptime("08:00","%H:%M").time(), key="ss_start")
+                s_end_t   = c1.time_input("End Time *",   value=datetime.strptime("10:00","%H:%M").time(), key="ss_end")
+                s_start = s_start_t.strftime("%H:%M")
+                s_end   = s_end_t.strftime("%H:%M")
                 max_stu = c2.number_input("Max Students",1,20,15)
                 notes   = st.text_area("Notes")
                 if st.form_submit_button("Create Session", width='stretch'):
@@ -702,13 +714,15 @@ def page_lab_sessions():
                                 st.success(f"Session **{sid}** created!"); st.rerun()
                     else: st.error("Fill all required fields.")
         with sub2:
-            with st.form("rs2"):
+            with st.form(f"rs2_{st.session_state.fv_session}"):
                 c1,c2    = st.columns(2)
                 r_course = c1.text_input("Course *",key="rc")
                 r_lec    = c2.selectbox("Lecturer",lec_names,key="rl")
                 r_date   = c1.date_input("First Date",min_value=date.today(),key="rd")
-                r_start  = c2.text_input("Start Time *",placeholder="08:00",key="rs_t")
-                r_end    = c1.text_input("End Time *",  placeholder="10:00",key="re_t")
+                r_start_t = c2.time_input("Start Time *", value=datetime.strptime("08:00","%H:%M").time(), key="rs_t")
+                r_end_t   = c1.time_input("End Time *",   value=datetime.strptime("10:00","%H:%M").time(), key="re_t")
+                r_start = r_start_t.strftime("%H:%M")
+                r_end   = r_end_t.strftime("%H:%M")
                 r_weeks  = c2.number_input("Weeks",1,24,12)
                 r_max    = c1.number_input("Max Students",1,20,15,key="rm")
                 r_notes  = st.text_area("Notes",key="rn")
@@ -728,6 +742,7 @@ def page_lab_sessions():
                                               r_start,r_end,int(r_max),r_notes,
                                               st.session_state.user["id"],recurring=True)
                             added += 1
+                        st.session_state.fv_session += 1
                         st.success(f"{added} session(s) created."); st.rerun()
                     else: st.error("Fill all required fields.")
 
@@ -753,8 +768,10 @@ def page_lab_sessions():
                     lec_idx  = lec_names.index(s["lecturer"]) if s["lecturer"] in lec_names else 0
                     e_lec    = c2.selectbox("Lecturer", lec_names, index=lec_idx)
                     e_date   = c1.date_input("Date", value=date.fromisoformat(s["date"]))
-                    e_start  = c2.text_input("Start Time *", value=s["start_time"])
-                    e_end    = c1.text_input("End Time *",   value=s["end_time"])
+                    e_start_t = c2.time_input("Start Time *", value=datetime.strptime(s["start_time"],"%H:%M").time(), key="es_start")
+                    e_end_t   = c1.time_input("End Time *",   value=datetime.strptime(s["end_time"],  "%H:%M").time(), key="es_end")
+                    e_start = e_start_t.strftime("%H:%M")
+                    e_end   = e_end_t.strftime("%H:%M")
                     e_max    = c2.number_input("Max Students", 1, 20, s["max_students"])
                     e_notes  = st.text_area("Notes", value=s.get("notes",""))
                     if st.form_submit_button("💾 Save Changes", width='stretch'):
@@ -926,8 +943,11 @@ def page_workstations():
                 note = st.text_input("Note",value=ws.get("notes",""),
                     key=f"wn_{ws['id']}",placeholder="e.g. Screen broken") \
                     if new_status=="maintenance" or ws["status"]=="maintenance" else ws.get("notes","")
-                if new_status!=ws["status"] or note!=ws.get("notes",""):
-                    db.update_workstation(ws["id"],new_status,note); st.rerun()
+                if st.button("💾 Save", key=f"wsave_{ws['id']}", use_container_width=False):
+                    db.update_workstation(ws["id"],new_status,note)
+                    db.add_audit(st.session_state.user["id"],"UPDATE_WORKSTATION",
+                                 f"{ws['label']} → {new_status}")
+                    st.rerun()
     with tab2:
         q   = search_box("Filter by workstation (e.g. PC-01)...")
         att = db.get_all_attendance()
@@ -1156,45 +1176,177 @@ def page_attendance():
 
 def page_reports():
     header("📈 Reports & Analytics")
+
     att = db.get_all_attendance()
-    if not att: st.info("No data yet."); return
-    df  = pd.DataFrame(att)
+    if not att:
+        st.info("No attendance data yet.")
+        return
+
+    df = pd.DataFrame(att)
     df["date"] = pd.to_datetime(df["date"])
 
-    c1,c2 = st.columns(2)
+    # ── Date range filter ─────────────────────────────────────────────────────
+    st.subheader("📅 Filter by Date Range")
+    min_date = df["date"].min().date()
+    max_date = df["date"].max().date()
+    fc1, fc2, fc3 = st.columns([2, 2, 3])
+    d_from = fc1.date_input("From", value=min_date, min_value=min_date, max_value=max_date,
+                             key="rpt_from")
+    d_to   = fc2.date_input("To",   value=max_date, min_value=min_date, max_value=max_date,
+                             key="rpt_to")
+    presets = fc3.selectbox("Quick range",
+        ["Custom","Last 7 days","Last 30 days","Last 90 days","This semester (all)"],
+        key="rpt_preset")
+    today = date.today()
+    if presets == "Last 7 days":
+        d_from, d_to = today - timedelta(days=7), today
+    elif presets == "Last 30 days":
+        d_from, d_to = today - timedelta(days=30), today
+    elif presets == "Last 90 days":
+        d_from, d_to = today - timedelta(days=90), today
+    elif presets == "This semester (all)":
+        d_from, d_to = min_date, max_date
+
+    mask = (df["date"].dt.date >= d_from) & (df["date"].dt.date <= d_to)
+    df   = df[mask]
+
+    if df.empty:
+        st.warning("No data in selected range.")
+        return
+
+    # ── Summary metrics ───────────────────────────────────────────────────────
+    total_visits  = len(df)
+    unique_studs  = df["student_id"].nunique()
+    late_count    = int(df["late"].sum()) if "late" in df.columns else 0
+    late_pct      = f"{late_count/total_visits*100:.1f}%" if total_visits else "0%"
+
+    m1, m2, m3, m4 = st.columns(4)
+    metric(m1, total_visits,  "Total Check-ins")
+    metric(m2, unique_studs,  "Unique Students")
+    metric(m3, late_count,    "Late Arrivals")
+    metric(m4, late_pct,      "Late Rate")
+    st.markdown("---")
+
+    # ── Charts ────────────────────────────────────────────────────────────────
+    c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Daily Check-ins (Last 14 Days)")
-        daily = df.groupby("date").size().reset_index(name="count").tail(14)
-        fig = px.bar(daily,x="date",y="count",color_discrete_sequence=["#2d6a9f"])
-        fig.update_layout(margin=dict(t=10),height=270)
-        st.plotly_chart(fig,width='stretch')
+        st.subheader("Daily Check-ins")
+        daily = df.groupby(df["date"].dt.date).size().reset_index(name="count")
+        daily.columns = ["Date", "Check-ins"]
+        fig = px.bar(daily, x="Date", y="Check-ins",
+                     color_discrete_sequence=["#2d6a9f"])
+        fig.update_layout(margin=dict(t=10), height=270)
+        st.plotly_chart(fig, width='stretch')
+
     with c2:
         st.subheader("Session vs Open-Access Split")
-        tc = df["type"].value_counts().reset_index(); tc.columns=["Type","Count"]
-        fig2 = px.pie(tc,values="Count",names="Type",color_discrete_sequence=["#1e3a5f","#2d9fd6"])
-        fig2.update_layout(margin=dict(t=10),height=270)
-        st.plotly_chart(fig2,width='stretch')
+        tc = df["type"].value_counts().reset_index()
+        tc.columns = ["Type", "Count"]
+        fig2 = px.pie(tc, values="Count", names="Type",
+                      color_discrete_sequence=["#1e3a5f", "#2d9fd6"])
+        fig2.update_layout(margin=dict(t=10), height=270)
+        st.plotly_chart(fig2, width='stretch')
 
-    c3,c4 = st.columns(2)
+    c3, c4 = st.columns(2)
     with c3:
         st.subheader("Workstation Usage")
-        wc = df["workstation"].value_counts().reset_index(); wc.columns=["Workstation","Uses"]
-        fig3 = px.bar(wc,x="Workstation",y="Uses",color_discrete_sequence=["#1e3a5f"])
-        fig3.update_layout(margin=dict(t=10),height=260)
-        st.plotly_chart(fig3,width='stretch')
+        wc = df["workstation"].value_counts().reset_index()
+        wc.columns = ["Workstation", "Uses"]
+        fig3 = px.bar(wc, x="Workstation", y="Uses",
+                      color_discrete_sequence=["#1e3a5f"])
+        fig3.update_layout(margin=dict(t=10), height=260)
+        st.plotly_chart(fig3, width='stretch')
+
     with c4:
         if "late" in df.columns:
-            st.subheader("Late vs On-Time Arrivals")
-            lc = df["late"].map({0:"On Time",1:"Late",True:"Late",False:"On Time"}).value_counts().reset_index()
-            lc.columns=["Status","Count"]
-            fig4 = px.pie(lc,values="Count",names="Status",color_discrete_sequence=["#2d9fd6","#f0ad4e"])
-            fig4.update_layout(margin=dict(t=10),height=260)
-            st.plotly_chart(fig4,width='stretch')
+            st.subheader("Late vs On-Time")
+            lc = df["late"].map(
+                {0: "On Time", 1: "Late", True: "Late", False: "On Time"}
+            ).value_counts().reset_index()
+            lc.columns = ["Status", "Count"]
+            fig4 = px.pie(lc, values="Count", names="Status",
+                          color_discrete_sequence=["#2d9fd6", "#f0ad4e"])
+            fig4.update_layout(margin=dict(t=10), height=260)
+            st.plotly_chart(fig4, width='stretch')
 
+    # ── Top students ──────────────────────────────────────────────────────────
     st.subheader("Most Active Students")
-    top = df.groupby(["student_id","student_name"]).size().reset_index(name="Visits")
-    top = top.sort_values("Visits",ascending=False).head(10)
-    st.dataframe(top,width='stretch',hide_index=True)
+    top = (df.groupby(["student_id", "student_name"])
+             .size().reset_index(name="Visits")
+             .sort_values("Visits", ascending=False)
+             .head(10))
+    st.dataframe(top, width='stretch', hide_index=True)
+
+    # ── Export filtered data ──────────────────────────────────────────────────
+    st.markdown("---")
+    export_df = df.copy()
+    export_df["date"] = export_df["date"].astype(str)
+    c1, c2 = st.columns(2)
+    c1.download_button("📥 Download CSV", export_df.to_csv(index=False),
+                       f"report_{d_from}_{d_to}.csv", "text/csv", width='stretch')
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        export_df.to_excel(w, index=False, sheet_name="Attendance")
+    c2.download_button("📊 Download Excel", buf.getvalue(),
+                       f"report_{d_from}_{d_to}.xlsx",
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       width='stretch')
+
+
+def page_audit_log():
+    header("🔍 Audit Log", "Full record of all system actions")
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    fc1, fc2, fc3 = st.columns(3)
+    actor_q  = fc1.text_input("Filter by user ID", placeholder="e.g. ADMIN001")
+    action_q = fc2.text_input("Filter by action",  placeholder="e.g. LOGIN")
+    limit    = fc3.selectbox("Show", [100, 200, 500, 1000], index=0)
+
+    logs = db.get_audit_log(
+        limit=limit,
+        actor=actor_q.strip() or None,
+        action=action_q.strip() or None
+    )
+
+    if not logs:
+        st.info("No audit log entries match your filters.")
+        return
+
+    st.caption(f"Showing {len(logs)} entries (most recent first)")
+
+    df = pd.DataFrame(logs)[["timestamp", "actor", "action", "detail"]]
+    df.columns = ["Timestamp", "User", "Action", "Detail"]
+    df["Timestamp"] = df["Timestamp"].str[:16]
+
+    # Colour-code by action type
+    action_icons = {
+        "LOGIN": "🔑", "LOGOUT": "🚪", "AUTO_LOGOUT": "⏱️",
+        "REGISTER": "✨", "REGISTER_STUDENT": "🎓",
+        "CHECKIN": "✅", "CHECKOUT": "🚪", "BULK_CHECKIN": "👥",
+        "CREATE_SESSION": "📅", "EDIT_SESSION": "✏️", "CANCEL_SESSION": "❌",
+        "CREATE_ASSIGNMENT": "📝", "SUBMIT_ASSIGNMENT": "📤", "GRADE_SUBMISSION": "🏆",
+        "PASSWORD_RESET": "🔒", "PASSWORD_CHANGE": "🔑", "PROFILE_UPDATE": "👤",
+        "DEACTIVATE": "🔴", "REACTIVATE": "✅", "DELETE_USER": "🗑️",
+        "EMAIL_FAILED": "📧", "UPDATE_WORKSTATION": "🖥️",
+    }
+    df["Action"] = df["Action"].apply(
+        lambda a: f"{action_icons.get(a, '📋')} {a}"
+    )
+
+    st.dataframe(df, width='stretch', hide_index=True, height=500)
+
+    # Export
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    raw_df = pd.DataFrame(logs)
+    c1.download_button("📥 Export CSV", raw_df.to_csv(index=False),
+                       "audit_log.csv", "text/csv", width='stretch')
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        raw_df.to_excel(w, index=False, sheet_name="Audit Log")
+    c2.download_button("📊 Export Excel", buf.getvalue(), "audit_log.xlsx",
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       width='stretch')
 
 
 def page_blackout_dates():
@@ -1704,6 +1856,7 @@ else:
             "📋 Attendance":         page_attendance,
             "📝 Assignments":        page_assignments_staff,
             "📈 Reports":            page_reports,
+            "🔍 Audit Log":          page_audit_log,
             "🚫 Blackout Dates":     page_blackout_dates,
             "⚙️ Profile & Settings": page_profile,
         },

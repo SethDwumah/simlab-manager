@@ -1,6 +1,7 @@
-streamlit>=1.32.0
-pandas>=2.0.0
-plotly>=5.18.0
-qrcode[pil]>=7.4.2
-openpyxl>=3.1.0
-Pillow>=10.0.0
+streamlit>=1.35.0
+pandas
+plotly
+qrcode[pil]
+Pillow
+openpyxl
+bcrypt>=4.0.0
