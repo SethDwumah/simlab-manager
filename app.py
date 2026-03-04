@@ -21,8 +21,8 @@ st.set_page_config(page_title="SimLab Manager", page_icon="🖥️",
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 ADMIN_CODE       = os.environ.get("SIMLAB_ADMIN_CODE", "SIMLAB2024")
-GMAIL_USER       = os.environ.get("SIMLAB_GMAIL_USER", "")
-GMAIL_APP_PW     = os.environ.get("SIMLAB_GMAIL_APP_PW", "")
+GMAIL_USER       = os.environ.get("SIMLAB_GMAIL_USER", "dwumahseth444@gmail.com")
+GMAIL_APP_PW     = os.environ.get("SIMLAB_GMAIL_APP_PW", "hxxj zpat seud jukj")
 SESSION_TIMEOUT  = 30          # minutes
 TIME_SLOTS       = ["08:00–09:00","09:00–10:00","10:00–11:00","11:00–12:00",
                     "13:00–14:00","14:00–15:00","15:00–16:00","16:00–17:00"]
