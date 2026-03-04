@@ -180,7 +180,7 @@ def maybe_show_ann_popup():
             st.write(a["body"])
             st.caption(f"Posted by {a['author']} · {str(a['created_at'])[:10]}")
             st.markdown("---")
-        if st.button("✅ Dismiss", use_container_width=True):
+        if st.button("✅ Dismiss", width='stretch'):
             st.session_state.ann_popup_shown = True
             st.rerun()
 
@@ -202,7 +202,7 @@ def auth_pages():
             with st.form("lf"):
                 uid = st.text_input("Student / Staff ID", placeholder="e.g. STU001")
                 pw  = st.text_input("Password", type="password")
-                if st.form_submit_button("Login", use_container_width=True):
+                if st.form_submit_button("Login", width='stretch'):
                     result = db.get_active_user_by_id_pw(uid, hash_pw(pw))
                     if result == "locked":
                         st.error("🔒 Account temporarily locked after too many failed attempts. Try again in 15 minutes.")
@@ -236,7 +236,7 @@ def auth_pages():
                 sec_a     = st.text_input("Security Answer *")
                 invite    = st.text_input("Admin Invite Code *", type="password") \
                             if role_choice=="admin" else None
-                if st.form_submit_button("Create Account", use_container_width=True):
+                if st.form_submit_button("Create Account", width='stretch'):
                     errs = []
                     if not all([new_id,new_name,new_email,new_pw,sec_a]): errs.append("All fields required.")
                     if new_pw != new_pw2:   errs.append("Passwords do not match.")
@@ -271,7 +271,7 @@ def auth_pages():
                 r_ans  = st.text_input("Security Answer *")
                 r_pw   = st.text_input("New Password *",      type="password")
                 r_pw2  = st.text_input("Confirm Password *",  type="password")
-                if st.form_submit_button("Reset Password", use_container_width=True):
+                if st.form_submit_button("Reset Password", width='stretch'):
                     u = db.get_user(r_id)
                     if not u:                                           st.error("ID not found.")
                     elif u.get("security_a")!=hash_pw(r_ans.lower().strip()): st.error("Wrong answer.")
@@ -310,7 +310,7 @@ def sidebar_nav():
         }[role]
         choice = st.radio("Nav", pages, label_visibility="collapsed")
         st.markdown("---")
-        if st.button("🚪 Logout", use_container_width=True):
+        if st.button("🚪 Logout", width='stretch'):
             db.add_audit(user["id"],"LOGOUT")
             for k in ["logged_in","user","last_active","ann_popup_shown"]:
                 st.session_state[k] = False if k=="logged_in" else None
@@ -366,7 +366,7 @@ def page_announcements():
                 title  = st.text_input("Title *")
                 body   = st.text_area("Message *")
                 pinned = st.checkbox("📌 Pin this announcement")
-                if st.form_submit_button("Post Announcement", use_container_width=True):
+                if st.form_submit_button("Post Announcement", width='stretch'):
                     if title and body:
                         db.create_announcement(title, body, user["id"], user["name"], pinned)
                         # notify all users
@@ -401,7 +401,7 @@ def page_profile():
             sq_index  = SECURITY_QS.index(user["security_q"]) if user.get("security_q") in SECURITY_QS else 0
             new_sec_q = c1.selectbox("Security Question", SECURITY_QS, index=sq_index)
             new_sec_a = c2.text_input("New Security Answer (blank = keep current)")
-            if st.form_submit_button("Save Changes", use_container_width=True):
+            if st.form_submit_button("Save Changes", width='stretch'):
                 sec_a_hash = hash_pw(new_sec_a.lower().strip()) if new_sec_a.strip() else None
                 db.update_user(user["id"], new_name, new_email, new_sec_q, sec_a_hash)
                 db.add_audit(user["id"],"PROFILE_UPDATE")
@@ -412,7 +412,7 @@ def page_profile():
             old_pw  = st.text_input("Current Password *", type="password")
             new_pw  = st.text_input("New Password *",      type="password")
             new_pw2 = st.text_input("Confirm Password *",  type="password")
-            if st.form_submit_button("Change Password", use_container_width=True):
+            if st.form_submit_button("Change Password", width='stretch'):
                 u = db.get_user(user["id"])
                 if u["password"]!=hash_pw(old_pw): st.error("Current password incorrect.")
                 elif new_pw!=new_pw2:              st.error("Passwords don't match.")
@@ -432,10 +432,10 @@ def page_my_qr():
     with col2:
         qr_data  = f"SIMLAB_CHECKIN:{user['id']}"
         qr_bytes = generate_qr_bytes(qr_data)
-        st.image(qr_bytes, caption=f"{user['name']} · {user['id']}", use_container_width=True)
+        st.image(qr_bytes, caption=f"{user['name']} · {user['id']}", width='stretch')
         st.download_button("📥 Download QR Code", qr_bytes,
                            f"simlab_qr_{user['id']}.png", "image/png",
-                           use_container_width=True)
+                           width='stretch')
         st.info("💡 Save this QR to your phone and show it at the door for instant check-in.")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -491,7 +491,7 @@ def page_lecturer_dashboard():
                                        "workstation", "checked_out"]]
             df.columns = ["Student", "Date", "Time", "Workstation", "Checked Out"]
             df["Checked Out"] = df["Checked Out"].map({0: "❌", 1: "✅", False: "❌", True: "✅"})
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width='stretch', hide_index=True)
         else:
             st.write("No attendance records for your sessions yet.")
 
@@ -574,7 +574,7 @@ def page_students():
                                  "Email":u.get("email",""),
                                  "Active":"✅" if u.get("active",1) else "🔴"}
                                 for u in users])
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width='stretch', hide_index=True)
             st.caption(f"{len(users)} user(s)")
         else:
             st.info("No users found.")
@@ -586,7 +586,7 @@ def page_students():
             name  = c2.text_input("Full Name *")
             email = c1.text_input("Email")
             pw    = c2.text_input("Password *", type="password")
-            if st.form_submit_button("Register", use_container_width=True):
+            if st.form_submit_button("Register", width='stretch'):
                 if sid and name and pw:
                     id_ok, id_err = validate_student_role_id(sid)
                     if not id_ok:
@@ -616,12 +616,12 @@ def page_students():
 
             c1, c2, c3 = st.columns(3)
             if is_active:
-                if c1.button("🔴 Deactivate Account", use_container_width=True):
+                if c1.button("🔴 Deactivate Account", width='stretch'):
                     db.set_user_active(selected["id"], False)
                     db.add_audit(st.session_state.user["id"], "DEACTIVATE", selected["id"])
                     st.success(f"{selected['name']} deactivated."); st.rerun()
             else:
-                if c1.button("✅ Reactivate Account", use_container_width=True):
+                if c1.button("✅ Reactivate Account", width='stretch'):
                     db.set_user_active(selected["id"], True)
                     db.add_audit(st.session_state.user["id"], "REACTIVATE", selected["id"])
                     st.success(f"{selected['name']} reactivated."); st.rerun()
@@ -629,7 +629,7 @@ def page_students():
             st.markdown("---")
             st.error("⚠️ Danger Zone")
             confirm = st.text_input(f"Type  {selected['id']}  to confirm deletion")
-            if c3.button("🗑️ Delete Permanently", use_container_width=True):
+            if c3.button("🗑️ Delete Permanently", width='stretch'):
                 if confirm == selected["id"]:
                     db.delete_user(selected["id"])
                     db.add_audit(st.session_state.user["id"], "DELETE_USER", selected["id"])
@@ -660,7 +660,7 @@ def page_lab_sessions():
                              "Late":late,
                              "Status":"❌ Cancelled" if s.get("cancelled") else "✅ Active",
                              "Recurring":bool(s["recurring"])})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
         else: st.info("No sessions yet.")
 
     with tab2:
@@ -678,7 +678,7 @@ def page_lab_sessions():
                 s_end   = c1.text_input("End Time *",   placeholder="10:00")
                 max_stu = c2.number_input("Max Students",1,20,15)
                 notes   = st.text_area("Notes")
-                if st.form_submit_button("Create Session", use_container_width=True):
+                if st.form_submit_button("Create Session", width='stretch'):
                     if course and s_start and s_end:
                         if db.is_blackout(str(s_date)):
                             st.error(f"⛔ {s_date} is a blackout date — lab is closed.")
@@ -703,7 +703,7 @@ def page_lab_sessions():
                 r_weeks  = c2.number_input("Weeks",1,24,12)
                 r_max    = c1.number_input("Max Students",1,20,15,key="rm")
                 r_notes  = st.text_area("Notes",key="rn")
-                if st.form_submit_button("Create Recurring Sessions", use_container_width=True):
+                if st.form_submit_button("Create Recurring Sessions", width='stretch'):
                     if r_course and r_start and r_end:
                         added = 0
                         for w in range(int(r_weeks)):
@@ -748,7 +748,7 @@ def page_lab_sessions():
                     e_end    = c1.text_input("End Time *",   value=s["end_time"])
                     e_max    = c2.number_input("Max Students", 1, 20, s["max_students"])
                     e_notes  = st.text_area("Notes", value=s.get("notes",""))
-                    if st.form_submit_button("💾 Save Changes", use_container_width=True):
+                    if st.form_submit_button("💾 Save Changes", width='stretch'):
                         conflict = db.sessions_overlap(str(e_date), e_start, e_end, exclude_id=sel_id)
                         if conflict:
                             st.error(f"Time conflict with **{conflict['course']}**.")
@@ -759,7 +759,7 @@ def page_lab_sessions():
                             st.success("Session updated!"); st.rerun()
             with cancel_tab:
                 reason = st.text_area("Cancellation reason *")
-                if st.button("❌ Cancel This Session", use_container_width=True):
+                if st.button("❌ Cancel This Session", width='stretch'):
                     if reason:
                         db.cancel_session(sel_id, reason)
                         db.add_audit(st.session_state.user["id"], "CANCEL_SESSION", sel_id)
@@ -853,7 +853,7 @@ def page_workstations():
             with cols[i%4]:
                 icon={"available":"🟢","in-use":"🟡","maintenance":"🔴"}.get(ws["status"],"⚪")
                 st.markdown(f"**{icon} {ws['label']}**")
-                new_status = st.selectbox("",["available","in-use","maintenance"],
+                new_status = st.selectbox("Status",["available","in-use","maintenance"],
                     index=["available","in-use","maintenance"].index(ws["status"]),
                     key=f"ws_{ws['id']}",label_visibility="collapsed")
                 note = st.text_input("Note",value=ws.get("notes",""),
@@ -868,7 +868,7 @@ def page_workstations():
         if att:
             df = pd.DataFrame(att)[["workstation","student_id","student_name","date","time","type"]]
             df.columns=["Workstation","Stu. ID","Name","Date","Time","Type"]
-            st.dataframe(df,use_container_width=True,hide_index=True)
+            st.dataframe(df,width='stretch',hide_index=True)
         else: st.info("No usage records yet.")
 
 
@@ -902,7 +902,7 @@ def page_attendance():
                       for b in bookings]
                 sel = st.selectbox("Booking",opts) if opts else st.text_input("No approved bookings")
             ws = st.selectbox("Assign Workstation",avail_ws) if avail_ws else st.text_input("None available")
-            if st.form_submit_button("✅ Check In",use_container_width=True):
+            if st.form_submit_button("✅ Check In",width='stretch'):
                 sid_to_use = stu_id_form.strip()
                 student = db.get_user(sid_to_use)
                 if not student: st.error("Student ID not found.")
@@ -953,7 +953,7 @@ def page_attendance():
                     help="Tick each student present in this session"
                 )
                 if st.button(f"✅ Check In {len(selected_studs)} Student(s)",
-                             use_container_width=True, disabled=not selected_studs):
+                             width='stretch', disabled=not selected_studs):
                     t_now      = datetime.now().strftime("%H:%M")
                     late       = db.is_late_for_session(sel_id, t_now)
                     assigned_ws = avail_ws.copy()
@@ -1015,16 +1015,16 @@ def page_attendance():
             if s_f:
                 df = df[df["student_id"].str.contains(s_f, case=False) |
                         df["student_name"].str.contains(s_f, case=False)]
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width='stretch', hide_index=True)
             c1, c2 = st.columns(2)
             c1.download_button("📥 Download CSV", df.to_csv(index=False),
-                               "attendance.csv", "text/csv", use_container_width=True)
+                               "attendance.csv", "text/csv", width='stretch')
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as w:
                 df.to_excel(w, index=False, sheet_name="Attendance")
             c2.download_button("📊 Download Excel", buf.getvalue(), "attendance.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True)
+                width='stretch')
 
     # PER-SESSION EXPORT ──────────────────────────────────────────────────────
     with tab5:
@@ -1060,14 +1060,14 @@ def page_attendance():
                 c2.metric("On Time",       total - late_c)
                 c3.metric("Late Arrivals", late_c)
 
-                st.dataframe(df_display, use_container_width=True, hide_index=True)
+                st.dataframe(df_display, width='stretch', hide_index=True)
 
                 fname_base = f"attendance_{sel_sess['course'].replace(' ','_')}_{sel_sess['date']}"
                 c1, c2 = st.columns(2)
                 c1.download_button("📥 Download CSV",
                                    df_display.to_csv(index=False),
                                    f"{fname_base}.csv", "text/csv",
-                                   use_container_width=True)
+                                   width='stretch')
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                     info_df = pd.DataFrame({
@@ -1082,7 +1082,7 @@ def page_attendance():
                 c2.download_button("📊 Download Excel", buf.getvalue(),
                                    f"{fname_base}.xlsx",
                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   use_container_width=True)
+                                   width='stretch')
 
 
 def page_reports():
@@ -1098,13 +1098,13 @@ def page_reports():
         daily = df.groupby("date").size().reset_index(name="count").tail(14)
         fig = px.bar(daily,x="date",y="count",color_discrete_sequence=["#2d6a9f"])
         fig.update_layout(margin=dict(t=10),height=270)
-        st.plotly_chart(fig,use_container_width=True)
+        st.plotly_chart(fig,width='stretch')
     with c2:
         st.subheader("Session vs Open-Access Split")
         tc = df["type"].value_counts().reset_index(); tc.columns=["Type","Count"]
         fig2 = px.pie(tc,values="Count",names="Type",color_discrete_sequence=["#1e3a5f","#2d9fd6"])
         fig2.update_layout(margin=dict(t=10),height=270)
-        st.plotly_chart(fig2,use_container_width=True)
+        st.plotly_chart(fig2,width='stretch')
 
     c3,c4 = st.columns(2)
     with c3:
@@ -1112,7 +1112,7 @@ def page_reports():
         wc = df["workstation"].value_counts().reset_index(); wc.columns=["Workstation","Uses"]
         fig3 = px.bar(wc,x="Workstation",y="Uses",color_discrete_sequence=["#1e3a5f"])
         fig3.update_layout(margin=dict(t=10),height=260)
-        st.plotly_chart(fig3,use_container_width=True)
+        st.plotly_chart(fig3,width='stretch')
     with c4:
         if "late" in df.columns:
             st.subheader("Late vs On-Time Arrivals")
@@ -1120,12 +1120,12 @@ def page_reports():
             lc.columns=["Status","Count"]
             fig4 = px.pie(lc,values="Count",names="Status",color_discrete_sequence=["#2d9fd6","#f0ad4e"])
             fig4.update_layout(margin=dict(t=10),height=260)
-            st.plotly_chart(fig4,use_container_width=True)
+            st.plotly_chart(fig4,width='stretch')
 
     st.subheader("Most Active Students")
     top = df.groupby(["student_id","student_name"]).size().reset_index(name="Visits")
     top = top.sort_values("Visits",ascending=False).head(10)
-    st.dataframe(top,use_container_width=True,hide_index=True)
+    st.dataframe(top,width='stretch',hide_index=True)
 
 
 def page_blackout_dates():
@@ -1146,7 +1146,7 @@ def page_blackout_dates():
         with st.form("bd_form"):
             bd_date   = st.date_input("Date *",min_value=date.today())
             bd_reason = st.text_input("Reason *",placeholder="e.g. Public Holiday, Maintenance Day")
-            if st.form_submit_button("Add Blackout Date",use_container_width=True):
+            if st.form_submit_button("Add Blackout Date",width='stretch'):
                 if bd_reason:
                     ok = db.add_blackout_date(str(bd_date),bd_reason)
                     if ok: st.success(f"{bd_date} marked as blackout."); st.rerun()
@@ -1182,14 +1182,14 @@ def page_student_dashboard():
     if my_att:
         df = pd.DataFrame(my_att)
         wanted=[c for c in ["date","time","type","workstation","status","late","checkout_time"] if c in df.columns]
-        st.dataframe(df[wanted].head(10),use_container_width=True,hide_index=True)
+        st.dataframe(df[wanted].head(10),width='stretch',hide_index=True)
     else: st.info("No visits yet.")
 
     st.subheader("Upcoming Approved Bookings")
     if approved:
         df2=pd.DataFrame(approved)[["id","date","time_slot"]]
         df2.columns=["Booking ID","Date","Time Slot"]
-        st.dataframe(df2,use_container_width=True,hide_index=True)
+        st.dataframe(df2,width='stretch',hide_index=True)
     else: st.info("No upcoming bookings.")
 
 
@@ -1221,7 +1221,7 @@ def page_book_slot():
                                  max_value=date.today()+timedelta(days=MAX_BOOK_DAYS))
         bk_slot = c2.selectbox("Time Slot",TIME_SLOTS)
         purpose = st.text_area("Purpose / Reason (max 300 chars)",max_chars=300)
-        if st.form_submit_button("📩 Submit Request",use_container_width=True):
+        if st.form_submit_button("📩 Submit Request",width='stretch'):
             if db.is_blackout(str(bk_date)):
                 st.error("⛔ That date is a blackout day — the lab is closed.")
             elif db.slot_booking_count(str(bk_date),bk_slot)>=MAX_PER_SLOT:
@@ -1245,7 +1245,7 @@ def page_book_slot():
     if bks:
         df=pd.DataFrame(bks)[["id","date","time_slot","status","purpose"]]
         df.columns=["ID","Date","Time Slot","Status","Purpose"]
-        st.dataframe(df,use_container_width=True,hide_index=True)
+        st.dataframe(df,width='stretch',hide_index=True)
         # cancel pending bookings
         pending=[b for b in bks if b["status"]=="pending"]
         if pending:
@@ -1253,7 +1253,7 @@ def page_book_slot():
             cancel_label=st.selectbox("Select booking to cancel",
                 [f"{b['id']} — {b['date']} {b['time_slot']}" for b in pending])
             cancel_id=cancel_label.split(" — ")[0]
-            if st.button("❌ Cancel This Booking",use_container_width=True):
+            if st.button("❌ Cancel This Booking",width='stretch'):
                 db.update_booking_status(cancel_id,"rejected","Cancelled by student")
                 db.add_audit(user["id"],"CANCEL_BOOKING",cancel_id)
                 st.success("Booking cancelled."); st.rerun()
@@ -1267,7 +1267,7 @@ def page_my_history():
     if att:
         df=pd.DataFrame(att)
         wanted=[c for c in ["date","time","type","workstation","status","late","checkout_time"] if c in df.columns]
-        st.dataframe(df[wanted],use_container_width=True,hide_index=True)
+        st.dataframe(df[wanted],width='stretch',hide_index=True)
         st.download_button("📥 Download CSV",df.to_csv(index=False),"my_visits.csv","text/csv")
     else: st.info("No visit records yet.")
 
@@ -1302,7 +1302,7 @@ def page_assignments_staff():
                     "Status": "⌛ Past Due" if past_due else "✅ Open",
                     "Active": "✅" if a["active"] else "🗃️"
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
             # archive
             active_asgs = [a for a in asgs if a["active"]]
             if active_asgs:
@@ -1332,7 +1332,7 @@ def page_assignments_staff():
                 ["None"] + [f"{s['id']} | {s['course']} | {s['date']}" for s in sessions])
             description = st.text_area("Instructions / Description *")
 
-            if st.form_submit_button("📤 Publish Assignment", use_container_width=True):
+            if st.form_submit_button("📤 Publish Assignment", width='stretch'):
                 if title and description:
                     from uuid import uuid4
                     aid        = f"ASG{db.assignment_count()+1:04d}"
@@ -1412,7 +1412,7 @@ def page_assignments_staff():
                                                         step=0.5, key=f"gs_{sub['id']}")
                             g_fb     = gc2.text_area("Feedback", value=sub.get("feedback",""),
                                                      key=f"gf_{sub['id']}")
-                            if st.form_submit_button("💾 Save Grade", use_container_width=True):
+                            if st.form_submit_button("💾 Save Grade", width='stretch'):
                                 db.grade_submission(asg_id, sub["student_id"],
                                                     g_score, g_fb, user["name"])
                                 notify_and_email(sub["student_id"],
@@ -1442,14 +1442,14 @@ def page_assignments_staff():
                     gdf = pd.DataFrame(grade_rows)
                     c1, c2 = st.columns(2)
                     c1.download_button("📥 CSV", gdf.to_csv(index=False),
-                                       f"grades_{asg_id}.csv", "text/csv", use_container_width=True)
+                                       f"grades_{asg_id}.csv", "text/csv", width='stretch')
                     buf = io.BytesIO()
                     with pd.ExcelWriter(buf, engine="openpyxl") as w:
                         gdf.to_excel(w, index=False, sheet_name="Grades")
                     c2.download_button("📊 Excel", buf.getvalue(),
                                        f"grades_{asg_id}.xlsx",
                                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                       use_container_width=True)
+                                       width='stretch')
                 else:
                     st.info("No graded submissions yet to export.")
 
@@ -1500,7 +1500,7 @@ def page_assignments_student():
                             label    = "📤 Replace Submission" if existing else "📤 Submit Assignment"
                             uploaded = st.file_uploader("Upload your work (PDF or DOCX)",
                                 type=["pdf","docx"], key=f"up_{asg['id']}")
-                            if st.form_submit_button(label, use_container_width=True):
+                            if st.form_submit_button(label, width='stretch'):
                                 if uploaded:
                                     file_bytes = uploaded.read()
                                     if len(file_bytes) > 10 * 1024 * 1024:
@@ -1568,7 +1568,7 @@ def page_assignments_student():
                     "Feedback":   s.get("feedback","") or "—"
                 })
             df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width='stretch', hide_index=True)
             st.download_button("📥 Download My Grades",
                                df.to_csv(index=False), "my_grades.csv", "text/csv")
 
