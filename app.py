@@ -82,7 +82,7 @@ st.markdown("""
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for k, v in [("logged_in",False),("user",None),("last_active",None),
-             ("ann_popup_shown",False)]:
+             ("ann_popup_shown",False),("sel_book_date",None),("sel_book_slot",None)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -312,7 +312,8 @@ def sidebar_nav():
         st.markdown("---")
         if st.button("🚪 Logout", width='stretch'):
             db.add_audit(user["id"],"LOGOUT")
-            for k in ["logged_in","user","last_active","ann_popup_shown"]:
+            for k in ["logged_in","user","last_active","ann_popup_shown",
+                      "sel_book_date","sel_book_slot"]:
                 st.session_state[k] = False if k=="logged_in" else None
             st.rerun()
     return choice
@@ -1195,48 +1196,82 @@ def page_student_dashboard():
 
 def page_book_slot():
     user = st.session_state.user
-    header("🗓️ Book a Lab Slot",f"Up to {MAX_BOOK_DAYS} days ahead")
+    header("🗓️ Book a Lab Slot", f"Up to {MAX_BOOK_DAYS} days ahead")
 
-    st.subheader("📊 Real-time Slot Availability")
-    for offset in range(MAX_BOOK_DAYS+1):
-        chk = date.today()+timedelta(days=offset)
+    # ── Interactive availability grid ─────────────────────────────────────────
+    st.subheader("📊 Click a slot to book it")
+    st.caption("🟢 Available — click to select  |  🔴 Full — cannot book")
+
+    for offset in range(MAX_BOOK_DAYS + 1):
+        chk = date.today() + timedelta(days=offset)
         if db.is_blackout(str(chk)):
             st.markdown(f"**{chk.strftime('%A, %d %b')}** 🚫 Lab Closed (Blackout Day)")
             continue
-        st.markdown(f"**{chk.strftime('%A, %d %b')}**")
+
+        st.markdown(f"**📅 {chk.strftime('%A, %d %b %Y')}**")
         cols = st.columns(len(TIME_SLOTS))
-        for i,slot in enumerate(TIME_SLOTS):
-            cnt=db.slot_booking_count(str(chk),slot); avail=MAX_PER_SLOT-cnt
-            cols[i].markdown(
-                f"<div style='text-align:center;font-size:.72rem'>{slot}<br>"
-                f"<b style='color:{'#155724' if avail>0 else '#721c24'}'>"
-                f"{'✅' if avail>0 else '🔴'} {avail} left</b></div>",
-                unsafe_allow_html=True)
+        for i, slot in enumerate(TIME_SLOTS):
+            cnt   = db.slot_booking_count(str(chk), slot)
+            avail = MAX_PER_SLOT - cnt
+            is_selected = (st.session_state.sel_book_date == str(chk) and
+                           st.session_state.sel_book_slot == slot)
+            with cols[i]:
+                if avail > 0:
+                    # Highlight selected slot
+                    label = f"{'🔵' if is_selected else '🟢'} {slot}\n{avail} left"
+                    if st.button(label, key=f"slot_{chk}_{i}",
+                                 type="primary" if is_selected else "secondary",
+                                 use_container_width=False):
+                        st.session_state.sel_book_date = str(chk)
+                        st.session_state.sel_book_slot = slot
+                        st.rerun()
+                else:
+                    st.markdown(
+                        f"<div style='text-align:center;font-size:.72rem;padding:.4rem;"
+                        f"border:1px solid #f5c2c7;border-radius:8px;color:#721c24;"
+                        f"background:#f8d7da'>{slot}<br><b>🔴 Full</b></div>",
+                        unsafe_allow_html=True)
         st.markdown("")
 
+    # ── Booking form — pre-filled if slot was clicked ─────────────────────────
     st.markdown("---")
+    if st.session_state.sel_book_date and st.session_state.sel_book_slot:
+        st.info(f"✅ Selected: **{st.session_state.sel_book_slot}** on "
+                f"**{date.fromisoformat(st.session_state.sel_book_date).strftime('%A, %d %b %Y')}**"
+                f" — fill in your purpose below and submit.")
+
     with st.form("bkf"):
-        c1,c2   = st.columns(2)
-        bk_date = c1.date_input("Date",min_value=date.today(),
-                                 max_value=date.today()+timedelta(days=MAX_BOOK_DAYS))
-        bk_slot = c2.selectbox("Time Slot",TIME_SLOTS)
-        purpose = st.text_area("Purpose / Reason (max 300 chars)",max_chars=300)
-        if st.form_submit_button("📩 Submit Request",width='stretch'):
+        c1, c2 = st.columns(2)
+        # Pre-fill date and slot from clicked selection, else default
+        default_date = (date.fromisoformat(st.session_state.sel_book_date)
+                        if st.session_state.sel_book_date else date.today())
+        default_slot_idx = (TIME_SLOTS.index(st.session_state.sel_book_slot)
+                            if st.session_state.sel_book_slot in TIME_SLOTS else 0)
+        bk_date = c1.date_input("Date", value=default_date,
+                                 min_value=date.today(),
+                                 max_value=date.today() + timedelta(days=MAX_BOOK_DAYS))
+        bk_slot = c2.selectbox("Time Slot", TIME_SLOTS, index=default_slot_idx)
+        purpose = st.text_area("Purpose / Reason (max 300 chars)", max_chars=300)
+        if st.form_submit_button("📩 Submit Request", width='stretch'):
             if db.is_blackout(str(bk_date)):
                 st.error("⛔ That date is a blackout day — the lab is closed.")
-            elif db.slot_booking_count(str(bk_date),bk_slot)>=MAX_PER_SLOT:
+            elif db.slot_booking_count(str(bk_date), bk_slot) >= MAX_PER_SLOT:
                 st.error("That slot is full. Please choose another.")
             else:
-                bks=db.get_bookings_for_student(user["id"])
-                conflict=any(b["date"]==str(bk_date) and b["time_slot"]==bk_slot
-                             and b["status"]!="rejected" for b in bks)
-                if conflict: st.error("You already have a request for that slot.")
+                bks      = db.get_bookings_for_student(user["id"])
+                conflict = any(b["date"] == str(bk_date) and b["time_slot"] == bk_slot
+                               and b["status"] != "rejected" for b in bks)
+                if conflict:
+                    st.error("You already have a request for that slot.")
                 else:
-                    db.create_booking(next_booking_id(),user["id"],user["name"],
-                                      str(bk_date),bk_slot,purpose)
+                    db.create_booking(next_booking_id(), user["id"], user["name"],
+                                      str(bk_date), bk_slot, purpose)
                     for admin in db.get_all_users("admin"):
                         notify_and_email(admin["id"],
-                            f"New booking from {user['name']} — {bk_date} {bk_slot}","info")
+                            f"New booking from {user['name']} — {bk_date} {bk_slot}", "info")
+                    # Clear selection after successful submit
+                    st.session_state.sel_book_date = None
+                    st.session_state.sel_book_slot = None
                     st.success("✅ Request submitted! You'll be notified when approved.")
 
     st.markdown("---")
