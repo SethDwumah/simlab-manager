@@ -82,7 +82,10 @@ st.markdown("""
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for k, v in [("logged_in",False),("user",None),("last_active",None),
-             ("ann_popup_shown",False),("sel_book_date",None),("sel_book_slot",None)]:
+             ("ann_popup_shown",False),("sel_book_date",None),("sel_book_slot",None),
+             ("fv_booking",0),("fv_register",0),("fv_session",0),
+             ("fv_checkin",0),("fv_announcement",0),("fv_blackout",0),
+             ("fv_assignment",0)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -313,7 +316,9 @@ def sidebar_nav():
         if st.button("🚪 Logout", width='stretch'):
             db.add_audit(user["id"],"LOGOUT")
             for k in ["logged_in","user","last_active","ann_popup_shown",
-                      "sel_book_date","sel_book_slot"]:
+                      "sel_book_date","sel_book_slot",
+                      "fv_booking","fv_register","fv_session",
+                      "fv_checkin","fv_announcement","fv_blackout","fv_assignment"]:
                 st.session_state[k] = False if k=="logged_in" else None
             st.rerun()
     return choice
@@ -363,7 +368,7 @@ def page_announcements():
                     if c2.button("🗃️ Archive", key=f"arc_{a['id']}"):
                         db.deactivate_announcement(a["id"]); st.rerun()
         with tab2:
-            with st.form("ann_form"):
+            with st.form(f"ann_form_{st.session_state.fv_announcement}"):
                 title  = st.text_input("Title *")
                 body   = st.text_area("Message *")
                 pinned = st.checkbox("📌 Pin this announcement")
@@ -375,6 +380,7 @@ def page_announcements():
                             if u["id"] != user["id"]:
                                 notify_and_email(u["id"], f"📢 New announcement: {title}",
                                     "info", f"SimLab Announcement: {title}", f"<h3>{title}</h3><p>{body}</p>")
+                        st.session_state.fv_announcement += 1
                         st.success("Announcement posted!"); st.rerun()
                     else:
                         st.error("Title and message are required.")
@@ -581,7 +587,7 @@ def page_students():
             st.info("No users found.")
 
     with tab2:
-        with st.form("rs"):
+        with st.form(f"rs_{st.session_state.fv_register}"):
             c1,c2 = st.columns(2)
             sid   = c1.text_input("Student ID *")
             name  = c2.text_input("Full Name *")
@@ -597,6 +603,7 @@ def page_students():
                                             SECURITY_QS[0],hash_pw("changeme"))
                         if ok:
                             db.add_audit(st.session_state.user["id"],"REGISTER_STUDENT",sid)
+                            st.session_state.fv_register += 1
                             st.success(f"Student {name} registered!"); st.rerun()
                         else: st.error("ID already exists.")
                 else: st.error("Fill all required fields.")
@@ -670,7 +677,7 @@ def page_lab_sessions():
         lec_names = [l["name"] for l in lecs]
         sub1, sub2 = st.tabs(["Single Session","Recurring (Weekly)"])
         with sub1:
-            with st.form("ss"):
+            with st.form(f"ss_{st.session_state.fv_session}"):
                 c1,c2  = st.columns(2)
                 course  = c1.text_input("Course Name / Code *")
                 lec     = c2.selectbox("Lecturer", lec_names)
@@ -691,6 +698,7 @@ def page_lab_sessions():
                                 db.create_session(sid,course,lec,str(s_date),s_start,s_end,
                                                   int(max_stu),notes,st.session_state.user["id"])
                                 db.add_audit(st.session_state.user["id"],"CREATE_SESSION",sid)
+                                st.session_state.fv_session += 1
                                 st.success(f"Session **{sid}** created!"); st.rerun()
                     else: st.error("Fill all required fields.")
         with sub2:
@@ -816,24 +824,82 @@ def page_bookings():
                         st.rerun()
         else: st.info("No bookings match your filters.")
     with tab2:
-        st.subheader("Slot Availability — Next 3 Days")
-        for offset in range(3):
-            chk = date.today()+timedelta(days=offset)
-            bd  = db.is_blackout(str(chk))
-            label = f"**📅 {chk.strftime('%A, %d %B %Y')}**"
-            if bd: label += " 🚫 BLACKOUT — Lab Closed"
-            st.markdown(label)
-            if not bd:
-                cols = st.columns(len(TIME_SLOTS))
-                for i,slot in enumerate(TIME_SLOTS):
-                    cnt   = db.slot_booking_count(str(chk),slot)
-                    avail = MAX_PER_SLOT-cnt
-                    cols[i].markdown(
-                        f"<div style='text-align:center;font-size:.73rem'>{slot}<br>"
-                        f"<b style='color:{'#155724' if avail>0 else '#721c24'}'>"
-                        f"{'✅' if avail>0 else '🔴'} {avail} left</b></div>",
+        st.subheader("Slot Availability & Bookings — Next 3 Days")
+        filter_day = st.selectbox("Jump to day",
+            [f"Day {i+1} — {(date.today()+timedelta(days=i)).strftime('%A, %d %b')}"
+             for i in range(3)], key="admin_slot_day_filter")
+        offset = int(filter_day.split("Day ")[1][0]) - 1
+        chk    = date.today() + timedelta(days=offset)
+        bd     = db.is_blackout(str(chk))
+
+        st.markdown(f"### 📅 {chk.strftime('%A, %d %B %Y')}"
+                    + (" 🚫 BLACKOUT — Lab Closed" if bd else ""))
+
+        if not bd:
+            all_bks = db.get_all_bookings()
+            cols = st.columns(len(TIME_SLOTS))
+            for i, slot in enumerate(TIME_SLOTS):
+                cnt    = db.slot_booking_count(str(chk), slot)
+                avail  = MAX_PER_SLOT - cnt
+                pending = [b for b in all_bks
+                           if b["date"]==str(chk) and b["time_slot"]==slot
+                           and b["status"]=="pending"]
+                approved = [b for b in all_bks
+                            if b["date"]==str(chk) and b["time_slot"]==slot
+                            and b["status"]=="approved"]
+                with cols[i]:
+                    color = "#155724" if avail > 0 else "#721c24"
+                    bg    = "#d4edda" if avail > 0 else "#f8d7da"
+                    st.markdown(
+                        f"<div style='text-align:center;font-size:.72rem;padding:.35rem;"
+                        f"border-radius:8px;background:{bg};color:{color};"
+                        f"margin-bottom:.4rem'><b>{slot}</b><br>"
+                        f"{'✅' if avail>0 else '🔴'} {avail}/{MAX_PER_SLOT} left</div>",
                         unsafe_allow_html=True)
-            st.markdown("")
+                    if pending:
+                        st.caption(f"⏳ {len(pending)} pending")
+                    if approved:
+                        st.caption(f"✅ {len(approved)} approved")
+
+            # Expandable booking list below grid
+            st.markdown("---")
+            day_bks = [b for b in all_bks if b["date"] == str(chk)]
+            if day_bks:
+                for slot in TIME_SLOTS:
+                    slot_bks = [b for b in day_bks if b["time_slot"] == slot]
+                    if not slot_bks:
+                        continue
+                    pending_n = sum(1 for b in slot_bks if b["status"] == "pending")
+                    with st.expander(f"**{slot}** — {len(slot_bks)} booking(s)"
+                                     + (f" · ⏳ {pending_n} pending" if pending_n else "")):
+                        for b in slot_bks:
+                            icon = {"pending":"🟡","approved":"🟢","rejected":"🔴"}.get(b["status"],"⚪")
+                            bcols = st.columns([4, 1, 1])
+                            bcols[0].write(f"{icon} **{b['student_name']}** (`{b['student_id']}`)"
+                                           f" — {b['status'].title()}")
+                            if b["status"] == "pending":
+                                if bcols[1].button("✅", key=f"slot_ap_{b['id']}",
+                                                   help="Approve"):
+                                    db.update_booking_status(b["id"], "approved")
+                                    notify_and_email(b["student_id"],
+                                        f"Your booking for {b['date']} {b['time_slot']} is approved! ✅",
+                                        "success", "SimLab: Booking Approved",
+                                        f"<p>Hi {b['student_name']},</p>"
+                                        f"<p>Your booking for <b>{b['date']}</b> at "
+                                        f"<b>{b['time_slot']}</b> has been approved.</p>")
+                                    st.rerun()
+                                if bcols[2].button("❌", key=f"slot_rj_{b['id']}",
+                                                   help="Reject"):
+                                    db.update_booking_status(b["id"], "rejected")
+                                    notify_and_email(b["student_id"],
+                                        f"Your booking for {b['date']} {b['time_slot']} was not approved.",
+                                        "error", "SimLab: Booking Not Approved",
+                                        f"<p>Hi {b['student_name']},</p>"
+                                        f"<p>Your booking for <b>{b['date']}</b> at "
+                                        f"<b>{b['time_slot']}</b> was not approved.</p>")
+                                    st.rerun()
+            else:
+                st.info("No bookings for this day yet.")
 
 
 def page_workstations():
@@ -892,7 +958,7 @@ def page_attendance():
                                   placeholder="Scan QR → paste here, or type ID directly")
         stu_id = qr_input.replace("SIMLAB_CHECKIN:","").strip() if qr_input else ""
 
-        with st.form("ci"):
+        with st.form(f"ci_{st.session_state.fv_checkin}"):
             stu_id_form = st.text_input("Student ID *", value=stu_id)
             if check_type=="Scheduled Session":
                 opts=[f"{s['id']} | {s['course']} | {s['date']} {s['start_time']}–{s['end_time']}"
@@ -926,7 +992,9 @@ def page_attendance():
                     db.add_audit(st.session_state.user["id"],"CHECKIN",sid_to_use)
                     success_msg = f"✅ {student['name']} checked in at {ws}"
                     if late: success_msg += " — **⚠️ Late arrival flagged**"
+                    st.session_state.fv_checkin += 1
                     st.success(success_msg)
+                    st.rerun()
 
     # BULK CHECK-IN ───────────────────────────────────────────────────────────
     with tab2:
@@ -937,7 +1005,7 @@ def page_attendance():
         else:
             sel_label = st.selectbox("Select Session",
                 [f"{s['id']} | {s['course']} | {s['date']} {s['start_time']}–{s['end_time']}"
-                 for s in sessions])
+                 for s in sessions], key="bulk_checkin_session_sel")
             sel_id   = sel_label.split(" | ")[0]
             sel_sess = db.get_session_by_id(sel_id)
             avail_ws = [w["label"] for w in db.get_available_workstations()]
@@ -1036,7 +1104,7 @@ def page_attendance():
         else:
             sel = st.selectbox("Select Session",
                 [f"{s['id']} | {s['course']} | {s['date']} {s['start_time']}–{s['end_time']}"
-                 for s in sessions])
+                 for s in sessions], key="per_session_export_sel")
             sel_id   = sel.split(" | ")[0]
             sel_sess = db.get_session_by_id(sel_id)
             att      = db.get_attendance_for_session(sel_id)
@@ -1144,13 +1212,15 @@ def page_blackout_dates():
         else:
             st.info("No blackout dates set.")
     with tab2:
-        with st.form("bd_form"):
+        with st.form(f"bd_form_{st.session_state.fv_blackout}"):
             bd_date   = st.date_input("Date *",min_value=date.today())
             bd_reason = st.text_input("Reason *",placeholder="e.g. Public Holiday, Maintenance Day")
             if st.form_submit_button("Add Blackout Date",width='stretch'):
                 if bd_reason:
                     ok = db.add_blackout_date(str(bd_date),bd_reason)
-                    if ok: st.success(f"{bd_date} marked as blackout."); st.rerun()
+                    if ok:
+                        st.session_state.fv_blackout += 1
+                        st.success(f"{bd_date} marked as blackout."); st.rerun()
                     else:  st.error("That date is already a blackout date.")
                 else: st.error("Please provide a reason.")
 
@@ -1240,7 +1310,7 @@ def page_book_slot():
                 f"**{date.fromisoformat(st.session_state.sel_book_date).strftime('%A, %d %b %Y')}**"
                 f" — fill in your purpose below and submit.")
 
-    with st.form("bkf"):
+    with st.form(f"bkf_{st.session_state.fv_booking}"):
         c1, c2 = st.columns(2)
         # Pre-fill date and slot from clicked selection, else default
         default_date = (date.fromisoformat(st.session_state.sel_book_date)
@@ -1272,7 +1342,9 @@ def page_book_slot():
                     # Clear selection after successful submit
                     st.session_state.sel_book_date = None
                     st.session_state.sel_book_slot = None
+                    st.session_state.fv_booking += 1
                     st.success("✅ Request submitted! You'll be notified when approved.")
+                    st.rerun()
 
     st.markdown("---")
     st.subheader("My Booking History")
@@ -1356,7 +1428,7 @@ def page_assignments_staff():
             sessions = [s for s in sessions if s["lecturer"] == user["name"]]
         courses = sorted(set(s["course"] for s in sessions)) or ["General"]
 
-        with st.form("create_asg"):
+        with st.form(f"create_asg_{st.session_state.fv_assignment}"):
             c1, c2 = st.columns(2)
             title       = c1.text_input("Assignment Title *")
             course      = c2.selectbox("Course *", courses)
@@ -1385,6 +1457,7 @@ def page_assignments_staff():
                             f"<p><b>Instructions:</b><br>{description}</p>"
                             f"<p>Log in to SimLab to submit your work.</p>")
                     db.add_audit(user["id"], "CREATE_ASSIGNMENT", aid)
+                    st.session_state.fv_assignment += 1
                     st.success(f"Assignment **{aid}** published and students notified!"); st.rerun()
                 else:
                     st.error("Title and description are required.")
