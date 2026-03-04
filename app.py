@@ -21,8 +21,8 @@ st.set_page_config(page_title="SimLab Manager", page_icon="🖥️",
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 ADMIN_CODE       = os.environ.get("SIMLAB_ADMIN_CODE", "SIMLAB2024")
-GMAIL_USER       = os.environ.get("SIMLAB_GMAIL_USER", "")
-GMAIL_APP_PW     = os.environ.get("SIMLAB_GMAIL_APP_PW", "")
+GMAIL_USER       = os.environ.get("SIMLAB_GMAIL_USER", "dwumahseth444@gmail.com")
+GMAIL_APP_PW     = os.environ.get("SIMLAB_GMAIL_APP_PW", "hxxj zpat seud jukj")
 SESSION_TIMEOUT  = 30          # minutes
 TIME_SLOTS       = ["08:00–09:00","09:00–10:00","10:00–11:00","11:00–12:00",
                     "13:00–14:00","14:00–15:00","15:00–16:00","16:00–17:00"]
@@ -87,7 +87,7 @@ for k, v in [("logged_in",False),("user",None),("last_active",None),
              ("ann_popup_shown",False),("sel_book_date",None),("sel_book_slot",None),
              ("fv_booking",0),("fv_register",0),("fv_session",0),
              ("fv_checkin",0),("fv_announcement",0),("fv_blackout",0),
-             ("fv_assignment",0)]:
+             ("fv_assignment",0),("admin_sel_slot",None)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -325,11 +325,16 @@ def sidebar_nav():
         st.markdown("---")
         if st.button("🚪 Logout", width='stretch'):
             db.add_audit(user["id"],"LOGOUT")
+            _int_keys = {"fv_booking","fv_register","fv_session",
+                         "fv_checkin","fv_announcement","fv_blackout","fv_assignment"}
             for k in ["logged_in","user","last_active","ann_popup_shown",
                       "sel_book_date","sel_book_slot",
                       "fv_booking","fv_register","fv_session",
-                      "fv_checkin","fv_announcement","fv_blackout","fv_assignment"]:
-                st.session_state[k] = False if k=="logged_in" else None
+                      "fv_checkin","fv_announcement","fv_blackout","fv_assignment",
+                      "admin_sel_slot"]:
+                if k == "logged_in":      st.session_state[k] = False
+                elif k in _int_keys:      st.session_state[k] = 0
+                else:                     st.session_state[k] = None
             st.rerun()
     return choice
 
@@ -842,81 +847,123 @@ def page_bookings():
         else: st.info("No bookings match your filters.")
     with tab2:
         st.subheader("Slot Availability & Bookings — Next 3 Days")
-        filter_day = st.selectbox("Jump to day",
-            [f"Day {i+1} — {(date.today()+timedelta(days=i)).strftime('%A, %d %b')}"
-             for i in range(3)], key="admin_slot_day_filter")
-        offset = int(filter_day.split("Day ")[1][0]) - 1
-        chk    = date.today() + timedelta(days=offset)
-        bd     = db.is_blackout(str(chk))
 
-        st.markdown(f"### 📅 {chk.strftime('%A, %d %B %Y')}"
-                    + (" 🚫 BLACKOUT — Lab Closed" if bd else ""))
+        # ── Session state: which slot is expanded ─────────────────────────────
+        if "admin_sel_slot" not in st.session_state:
+            st.session_state.admin_sel_slot = None   # "YYYY-MM-DD|HH:MM–HH:MM"
 
-        if not bd:
-            all_bks = db.get_all_bookings()
-            cols = st.columns(len(TIME_SLOTS))
-            for i, slot in enumerate(TIME_SLOTS):
-                cnt    = db.slot_booking_count(str(chk), slot)
-                avail  = MAX_PER_SLOT - cnt
-                pending = [b for b in all_bks
-                           if b["date"]==str(chk) and b["time_slot"]==slot
-                           and b["status"]=="pending"]
-                approved = [b for b in all_bks
-                            if b["date"]==str(chk) and b["time_slot"]==slot
-                            and b["status"]=="approved"]
-                with cols[i]:
-                    color = "#155724" if avail > 0 else "#721c24"
-                    bg    = "#d4edda" if avail > 0 else "#f8d7da"
-                    st.markdown(
-                        f"<div style='text-align:center;font-size:.72rem;padding:.35rem;"
-                        f"border-radius:8px;background:{bg};color:{color};"
-                        f"margin-bottom:.4rem'><b>{slot}</b><br>"
-                        f"{'✅' if avail>0 else '🔴'} {avail}/{MAX_PER_SLOT} left</div>",
-                        unsafe_allow_html=True)
-                    if pending:
-                        st.caption(f"⏳ {len(pending)} pending")
-                    if approved:
-                        st.caption(f"✅ {len(approved)} approved")
+        # ── Day tabs ──────────────────────────────────────────────────────────
+        day_labels = [
+            (date.today() + timedelta(days=i)).strftime("%A %d %b")
+            for i in range(3)
+        ]
+        day_tabs = st.tabs([f"📅 {d}" for d in day_labels])
 
-            # Expandable booking list below grid
-            st.markdown("---")
-            day_bks = [b for b in all_bks if b["date"] == str(chk)]
-            if day_bks:
-                for slot in TIME_SLOTS:
-                    slot_bks = [b for b in day_bks if b["time_slot"] == slot]
+        for day_offset, day_tab in enumerate(day_tabs):
+            chk = date.today() + timedelta(days=day_offset)
+            with day_tab:
+                if db.is_blackout(str(chk)):
+                    st.error(f"🚫 {chk.strftime('%A, %d %B %Y')} — Lab Closed (Blackout Day)")
+                    continue
+
+                all_bks = db.get_all_bookings()
+
+                # ── Slot grid — every cell is a real button ───────────────────
+                st.caption("Click a slot to view and manage its bookings")
+                grid_cols = st.columns(len(TIME_SLOTS))
+                for i, slot in enumerate(TIME_SLOTS):
+                    slot_bks  = [b for b in all_bks
+                                 if b["date"] == str(chk) and b["time_slot"] == slot]
+                    pending   = [b for b in slot_bks if b["status"] == "pending"]
+                    approved  = [b for b in slot_bks if b["status"] == "approved"]
+                    cnt       = len(pending) + len(approved)
+                    avail     = MAX_PER_SLOT - cnt
+                    sel_key   = f"{chk}|{slot}"
+                    is_sel    = st.session_state.admin_sel_slot == sel_key
+
+                    with grid_cols[i]:
+                        # Build button label
+                        if avail > 0:
+                            avail_icon = "🟢"
+                            avail_txt  = f"{avail}/{MAX_PER_SLOT} free"
+                        else:
+                            avail_icon = "🔴"
+                            avail_txt  = "FULL"
+
+                        badge = ""
+                        if pending:  badge += f" ⏳{len(pending)}"
+                        if approved: badge += f" ✅{len(approved)}"
+
+                        btn_label = f"{avail_icon} {slot}\n{avail_txt}{badge}"
+                        if st.button(
+                            btn_label,
+                            key=f"aslot_{chk}_{i}",
+                            type="primary" if is_sel else "secondary",
+                            use_container_width=True
+                        ):
+                            # Toggle: click again to collapse
+                            st.session_state.admin_sel_slot = (
+                                None if is_sel else sel_key
+                            )
+                            st.rerun()
+
+                # ── Inline booking panel for selected slot ────────────────────
+                st.markdown("")
+                if (st.session_state.admin_sel_slot and
+                        st.session_state.admin_sel_slot.startswith(str(chk))):
+
+                    active_slot = st.session_state.admin_sel_slot.split("|")[1]
+                    slot_bks    = [b for b in all_bks
+                                   if b["date"] == str(chk)
+                                   and b["time_slot"] == active_slot]
+
+                    st.markdown(f"#### 🕐 {active_slot} — Bookings")
+
                     if not slot_bks:
-                        continue
-                    pending_n = sum(1 for b in slot_bks if b["status"] == "pending")
-                    with st.expander(f"**{slot}** — {len(slot_bks)} booking(s)"
-                                     + (f" · ⏳ {pending_n} pending" if pending_n else "")):
+                        st.info("No bookings for this slot yet.")
+                    else:
                         for b in slot_bks:
-                            icon = {"pending":"🟡","approved":"🟢","rejected":"🔴"}.get(b["status"],"⚪")
-                            bcols = st.columns([4, 1, 1])
-                            bcols[0].write(f"{icon} **{b['student_name']}** (`{b['student_id']}`)"
-                                           f" — {b['status'].title()}")
+                            status_icon = {
+                                "pending":  "🟡", "approved": "🟢", "rejected": "🔴"
+                            }.get(b["status"], "⚪")
+
+                            bc = st.columns([5, 1, 1])
+                            bc[0].markdown(
+                                f"{status_icon} **{b['student_name']}** "
+                                f"`{b['student_id']}` — {b['status'].title()}"
+                                + (f"  \n<small>{b.get('purpose','')}</small>"
+                                   if b.get("purpose") else ""),
+                                unsafe_allow_html=True
+                            )
                             if b["status"] == "pending":
-                                if bcols[1].button("✅", key=f"slot_ap_{b['id']}",
-                                                   help="Approve"):
+                                if bc[1].button("✅ Approve",
+                                                key=f"slot_ap_{b['id']}"):
                                     db.update_booking_status(b["id"], "approved")
-                                    notify_and_email(b["student_id"],
+                                    notify_and_email(
+                                        b["student_id"],
                                         f"Your booking for {b['date']} {b['time_slot']} is approved! ✅",
                                         "success", "SimLab: Booking Approved",
                                         f"<p>Hi {b['student_name']},</p>"
                                         f"<p>Your booking for <b>{b['date']}</b> at "
-                                        f"<b>{b['time_slot']}</b> has been approved.</p>")
+                                        f"<b>{b['time_slot']}</b> has been approved.</p>"
+                                    )
                                     st.rerun()
-                                if bcols[2].button("❌", key=f"slot_rj_{b['id']}",
-                                                   help="Reject"):
+                                if bc[2].button("❌ Reject",
+                                                key=f"slot_rj_{b['id']}"):
                                     db.update_booking_status(b["id"], "rejected")
-                                    notify_and_email(b["student_id"],
+                                    notify_and_email(
+                                        b["student_id"],
                                         f"Your booking for {b['date']} {b['time_slot']} was not approved.",
                                         "error", "SimLab: Booking Not Approved",
                                         f"<p>Hi {b['student_name']},</p>"
                                         f"<p>Your booking for <b>{b['date']}</b> at "
-                                        f"<b>{b['time_slot']}</b> was not approved.</p>")
+                                        f"<b>{b['time_slot']}</b> was not approved.</p>"
+                                    )
                                     st.rerun()
-            else:
-                st.info("No bookings for this day yet.")
+                            else:
+                                bc[1].write("")   # spacer
+                                bc[2].write("")
+                        st.markdown("---")
 
 
 def page_workstations():
